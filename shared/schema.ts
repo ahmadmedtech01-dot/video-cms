@@ -39,6 +39,8 @@ export const videos = pgTable("videos", {
   duration: integer("duration"),
   fileSize: integer("file_size"),
   lastError: text("last_error"),
+  lastErrorCode: text("last_error_code"),
+  lastErrorHints: jsonb("last_error_hints").default(sql`'[]'::jsonb`),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

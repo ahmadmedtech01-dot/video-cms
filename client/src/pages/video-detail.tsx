@@ -485,32 +485,79 @@ export default function VideoDetailPage() {
           )}
 
           {/* Error state */}
-          {derivedStatus === "error" && (
-            <Card className="border border-destructive/30 bg-destructive/5">
-              <CardContent className="pt-5">
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="h-5 w-5 shrink-0 text-destructive mt-0.5" />
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-destructive">Processing failed</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">{(video as any).lastError || "An error occurred during video processing."}</p>
-                    {(video.sourceType === "vimeo" || video.sourceType === "vimeo_ingest") && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="mt-3"
-                        onClick={() => buildHls.mutate()}
-                        disabled={buildHls.isPending}
-                        data-testid="button-retry-build-hls"
-                      >
-                        <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
-                        {buildHls.isPending ? "Starting…" : "Retry Build HLS"}
-                      </Button>
-                    )}
+          {derivedStatus === "error" && (() => {
+            const errCode = (video as any).lastErrorCode as string | undefined;
+            const errHints: string[] = (video as any).lastErrorHints || [];
+            const isVimeoError = errCode === "VIMEO_NO_DOWNLOAD_LINKS" || errCode === "VIMEO_UNAUTHORIZED" || errCode === "VIMEO_NOT_FOUND";
+            return (
+              <Card className="border border-destructive/30 bg-destructive/5">
+                <CardContent className="pt-5 pb-4">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="h-5 w-5 shrink-0 text-destructive mt-0.5" />
+                    <div className="flex-1 space-y-3">
+                      <div>
+                        <p className="text-sm font-medium text-destructive">
+                          {errCode === "VIMEO_NO_DOWNLOAD_LINKS" ? "Vimeo file links not available" :
+                           errCode === "VIMEO_UNAUTHORIZED" ? "Vimeo token error" :
+                           errCode === "VIMEO_NOT_FOUND" ? "Vimeo video not found" :
+                           "Processing failed"}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {(video as any).lastError || "An error occurred during video processing."}
+                        </p>
+                      </div>
+
+                      {errHints.length > 0 && (
+                        <div className="rounded-md border border-destructive/20 bg-background/50 p-3">
+                          <p className="text-xs font-medium text-foreground mb-2">How to fix:</p>
+                          <ul className="space-y-1">
+                            {errHints.map((hint, i) => (
+                              <li key={i} className="flex gap-2 text-xs text-muted-foreground">
+                                <span className="shrink-0 text-destructive">•</span>
+                                <span>{hint}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {!isVimeoError && errHints.length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          Vimeo may be restricting file links due to plan, privacy settings, or token permissions.
+                          Best solution: upload the original file to CMS for secure playback.
+                        </p>
+                      )}
+
+                      <div className="flex flex-wrap gap-2">
+                        {errCode === "VIMEO_NO_DOWNLOAD_LINKS" && (
+                          <Button size="sm" asChild data-testid="button-upload-instead">
+                            <Link href="/upload">Upload file directly to CMS</Link>
+                          </Button>
+                        )}
+                        {errCode === "VIMEO_UNAUTHORIZED" && (
+                          <Button size="sm" asChild data-testid="button-go-settings">
+                            <Link href="/settings">Update Vimeo Token in Settings</Link>
+                          </Button>
+                        )}
+                        {(video.sourceType === "vimeo" || video.sourceType === "vimeo_ingest") && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => buildHls.mutate()}
+                            disabled={buildHls.isPending}
+                            data-testid="button-retry-build-hls"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+                            {buildHls.isPending ? "Retrying…" : "Retry Import"}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
+                </CardContent>
+              </Card>
+            );
+          })()}
 
           {/* Video preview link (only when truly ready and HLS exists) */}
           {derivedStatus === "ready" && (

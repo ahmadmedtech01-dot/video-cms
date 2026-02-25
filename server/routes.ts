@@ -11,6 +11,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { storage } from "./storage";
 import { spawn } from "child_process";
 import os from "os";
+import { vimeoFetchVideo, vimeoExtractFileLinks, vimeoDiagnoseNoFileAccess } from "./vimeo";
 
 function log(message: string) {
   const t = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true });
@@ -114,30 +115,40 @@ async function ingestVimeoVideo(videoId: string, vimeoUrl: string): Promise<void
   if (!vimeoVideoId) throw new Error("Could not parse Vimeo video ID from input");
 
   log(`Calling Vimeo API for video ID ${vimeoVideoId}...`);
-  const apiRes = await fetch(`https://api.vimeo.com/videos/${vimeoVideoId}`, {
-    headers: {
-      Authorization: `Bearer ${vimeoToken}`,
-      Accept: "application/vnd.vimeo.*+json;version=3.4",
-    },
-  });
-  if (!apiRes.ok) {
-    const err = await apiRes.json().catch(() => ({})) as any;
-    throw new Error(`Vimeo API error (${apiRes.status}): ${err.error || err.message || "Unknown"}`);
-  }
-  const vimeoData = await apiRes.json() as any;
+  const { status: httpStatus, data: vimeoData } = await vimeoFetchVideo(vimeoVideoId, vimeoToken);
 
-  const downloads: any[] = vimeoData.download || [];
-  if (!downloads.length) {
-    throw new Error("Vimeo file not available for download. Your Vimeo plan or video privacy settings do not expose download links. Please upgrade to Vimeo Pro or upload the file directly.");
+  if (httpStatus !== 200) {
+    const diag = vimeoDiagnoseNoFileAccess(vimeoData, httpStatus);
+    await storage.updateVideo(videoId, {
+      status: "error",
+      lastError: diag.message,
+      lastErrorCode: diag.code,
+      lastErrorHints: diag.hints,
+    } as any);
+    throw new Error(diag.message);
   }
-  downloads.sort((a: any, b: any) => (b.height || 0) - (a.height || 0));
-  const best = downloads[0];
-  if (!best?.link) throw new Error("No download link returned by Vimeo API");
 
-  log(`Downloading Vimeo video ${vimeoVideoId} (${best.quality || "unknown"} quality)...`);
+  const { progressiveMp4s } = vimeoExtractFileLinks(vimeoData);
+
+  if (!progressiveMp4s.length) {
+    const diag = vimeoDiagnoseNoFileAccess(vimeoData, httpStatus);
+    log(`Vimeo file links unavailable for ${vimeoVideoId}: hasFiles=${vimeoData.files !== undefined}, hasDownload=${vimeoData.download !== undefined}, privacy=${vimeoData.privacy?.view}`);
+    await storage.updateVideo(videoId, {
+      status: "error",
+      lastError: diag.message,
+      lastErrorCode: diag.code,
+      lastErrorHints: diag.hints,
+    } as any);
+    throw new Error(diag.message);
+  }
+
+  const best = progressiveMp4s[0];
+  log(`Downloading Vimeo video ${vimeoVideoId} (${best.quality} quality, height=${best.height || "?"}px)...`);
   const tmpPath = await downloadToTempFile(best.link, { Authorization: `Bearer ${vimeoToken}` });
   try {
     await transcodeAndStoreHls(videoId, tmpPath, [720, 480, 360]);
+    // Clear any previous error state on success
+    await storage.updateVideo(videoId, { lastError: null, lastErrorCode: null, lastErrorHints: [] } as any);
   } finally {
     try { fs.rmSync(tmpPath); } catch {}
   }
@@ -902,6 +913,33 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.put("/api/settings/:key", requireAuth, async (req, res) => {
     await storage.setSetting(req.params.key, req.body.value);
     res.json({ ok: true });
+  });
+
+  // ── Vimeo integration health check ────────────────────────
+  app.get("/api/integrations/vimeo/health", requireAuth, async (req, res) => {
+    try {
+      const token = process.env.VIMEO_ACCESS_TOKEN || (await storage.getSetting("vimeo_access_token")) || "";
+      if (!token) {
+        return res.status(400).json({ ok: false, error: "No Vimeo access token configured.", hints: ["Set VIMEO_ACCESS_TOKEN in environment variables or System Settings → vimeo_access_token."] });
+      }
+      const meRes = await fetch("https://api.vimeo.com/me", {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.vimeo.*+json;version=3.4" },
+      });
+      if (!meRes.ok) {
+        const err = await meRes.json().catch(() => ({})) as any;
+        return res.status(400).json({ ok: false, error: `Vimeo token rejected (${meRes.status}): ${err.error || err.message || "Unknown"}`, hints: ["Regenerate your Vimeo Personal Access Token with scopes: public, private, video_files."] });
+      }
+      const me = await meRes.json() as any;
+      return res.json({
+        ok: true,
+        name: me.name || "Unknown",
+        accountType: me.account || "unknown",
+        uri: me.uri,
+        hint: "Token is valid. For file downloads, ensure your token has the 'video_files' scope and you own or have access to the video.",
+      });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
   });
 
   // ── Dashboard Stats ───────────────────────────────────────

@@ -12,7 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Settings, Cloud, Shield, Zap, AlertTriangle, CheckCircle, Eye, EyeOff,
-  Save, Server, Database, Key,
+  Save, Server, Database, Key, Video, RefreshCw,
 } from "lucide-react";
 
 const AWS_REGIONS = [
@@ -81,6 +81,30 @@ export default function SystemSettingsPage() {
   };
 
   const s3Configured = !!(formData.aws_access_key_id && formData.s3_bucket && formData.aws_region);
+
+  const [vimeoHealth, setVimeoHealth] = useState<{ ok: boolean; name?: string; accountType?: string; error?: string; hint?: string; hints?: string[] } | null>(null);
+  const [vimeoHealthLoading, setVimeoHealthLoading] = useState(false);
+
+  const handleTestVimeo = async () => {
+    setVimeoHealthLoading(true);
+    setVimeoHealth(null);
+    try {
+      if (formData.vimeo_access_token) {
+        await apiRequest("PUT", "/api/settings", { vimeo_access_token: formData.vimeo_access_token });
+      }
+      const res = await fetch("/api/integrations/vimeo/health");
+      const data = await res.json();
+      setVimeoHealth(data);
+    } catch (e: any) {
+      setVimeoHealth({ ok: false, error: e.message });
+    } finally {
+      setVimeoHealthLoading(false);
+    }
+  };
+
+  const handleSaveVimeo = () => {
+    save.mutate({ vimeo_access_token: formData.vimeo_access_token || "" });
+  };
 
   if (isLoading) {
     return (
@@ -272,6 +296,73 @@ export default function SystemSettingsPage() {
             <Save className="h-4 w-4 mr-1.5" />
             Save Settings
           </Button>
+        </CardContent>
+      </Card>
+
+      {/* Vimeo Integration */}
+      <Card className="border border-card-border">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Video className="h-4 w-4" />
+            Vimeo Integration
+          </CardTitle>
+          <CardDescription>
+            Configure a Vimeo Personal Access Token to allow the CMS to download and transcode your Vimeo videos to HLS.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-1.5">
+            <Label>Vimeo Personal Access Token</Label>
+            <Input
+              type="password"
+              value={formData.vimeo_access_token || ""}
+              onChange={e => handleChange("vimeo_access_token", e.target.value)}
+              placeholder="Paste your Vimeo Personal Access Token here"
+              data-testid="input-vimeo-token"
+            />
+            <p className="text-xs text-muted-foreground">
+              Generate at <a href="https://developer.vimeo.com/apps" target="_blank" rel="noopener noreferrer" className="underline">developer.vimeo.com/apps</a>.
+              Token must have scopes: <code className="bg-muted px-1 rounded">public</code>, <code className="bg-muted px-1 rounded">private</code>, <code className="bg-muted px-1 rounded">video_files</code>.
+              The <strong>video_files</strong> scope requires a Vimeo Pro+ plan.
+            </p>
+          </div>
+
+          {vimeoHealth && (
+            <div className={`rounded-md border p-3 text-xs space-y-1 ${vimeoHealth.ok ? "border-green-500/30 bg-green-500/5" : "border-destructive/30 bg-destructive/5"}`}>
+              {vimeoHealth.ok ? (
+                <>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="h-3.5 w-3.5 text-green-500" />
+                    <span className="font-medium text-green-600 dark:text-green-400">Token is valid</span>
+                  </div>
+                  <p className="text-muted-foreground">Account: <span className="text-foreground font-medium">{vimeoHealth.name}</span> ({vimeoHealth.accountType})</p>
+                  {vimeoHealth.hint && <p className="text-muted-foreground mt-1">{vimeoHealth.hint}</p>}
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
+                    <span className="font-medium text-destructive">Token check failed</span>
+                  </div>
+                  <p className="text-muted-foreground">{vimeoHealth.error}</p>
+                  {(vimeoHealth.hints || []).map((h, i) => (
+                    <p key={i} className="text-muted-foreground">• {h}</p>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <Button onClick={handleSaveVimeo} disabled={save.isPending} variant="outline" data-testid="button-save-vimeo">
+              <Save className="h-4 w-4 mr-1.5" />
+              Save Token
+            </Button>
+            <Button onClick={handleTestVimeo} disabled={vimeoHealthLoading} variant="outline" data-testid="button-test-vimeo">
+              <RefreshCw className={`h-4 w-4 mr-1.5 ${vimeoHealthLoading ? "animate-spin" : ""}`} />
+              {vimeoHealthLoading ? "Testing…" : "Test Connection"}
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
