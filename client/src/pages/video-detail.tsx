@@ -587,7 +587,7 @@ export default function VideoDetailPage() {
                         </div>
                       )}
 
-                      {!isVimeoError && errHints.length === 0 && (
+                      {!isVimeoError && errHints.length === 0 && video.sourceType === "vimeo" && (
                         <p className="text-xs text-muted-foreground">
                           Vimeo may be restricting file links due to plan, privacy settings, or token permissions.
                           Best solution: upload the original file to CMS for secure playback.

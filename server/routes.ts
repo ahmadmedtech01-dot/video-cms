@@ -325,7 +325,7 @@ async function runFfmpegHls(
     );
 
     if (encryption) {
-      args.push(`-hls_key_inf_file`, encryption.keyInfoPath);
+      args.push(`-hls_key_info_file`, encryption.keyInfoPath);
     }
 
     args.push(path.join(outputDir, "v%v/index.m3u8"));
