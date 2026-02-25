@@ -52,23 +52,6 @@ function SettingRow({ label, description, children }: { label: string; descripti
   );
 }
 
-function toPreviewUrl(sourceType: string, url: string): string | null {
-  if (!url) return null;
-  try {
-    if (sourceType === "youtube") {
-      const parsed = new URL(url);
-      let id = parsed.searchParams.get("v");
-      if (!id && parsed.hostname === "youtu.be") id = parsed.pathname.slice(1).split("?")[0];
-      if (id) return `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1`;
-    }
-    if (sourceType === "vimeo") {
-      const parsed = new URL(url);
-      const m = parsed.pathname.match(/\/(\d+)/);
-      if (m) return `https://player.vimeo.com/video/${m[1]}?badge=0&autopause=0`;
-    }
-  } catch {}
-  return null;
-}
 
 function SaveBar({ dirty, onSave, isPending }: { dirty: boolean; onSave: () => void; isPending: boolean }) {
   if (!dirty) return null;
@@ -256,6 +239,10 @@ export default function VideoDetailPage() {
   const { data: videoData, isLoading } = useQuery({
     queryKey: ["/api/videos", id],
     queryFn: () => fetch(`/api/videos/${id}`).then(r => r.json()),
+    refetchInterval: (query) => {
+      const data = query.state.data as any;
+      return data?.status === "processing" || data?.status === "uploading" ? 3000 : false;
+    },
   });
 
   const { data: tokens = [], refetch: refetchTokens } = useQuery<EmbedToken[]>({
@@ -427,51 +414,53 @@ export default function VideoDetailPage() {
 
         {/* Overview */}
         <TabsContent value="overview" className="mt-4 space-y-4">
-          {/* Video preview */}
-          {(() => {
-            const previewUrl = toPreviewUrl(video.sourceType, video.sourceUrl);
-            if (previewUrl) return (
-              <Card className="border border-card-border overflow-hidden">
-                <CardHeader className="pb-2"><CardTitle className="text-base">Video Preview</CardTitle></CardHeader>
-                <CardContent className="p-0">
-                  <div className="relative w-full" style={{ paddingBottom: "56.25%" }}>
-                    <iframe
-                      src={previewUrl}
-                      className="absolute inset-0 w-full h-full"
-                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                      allowFullScreen
-                    />
+          {/* Processing state */}
+          {video.status === "processing" && (
+            <Card className="border border-amber-500/30 bg-amber-500/5">
+              <CardContent className="pt-5">
+                <div className="flex items-center gap-3">
+                  <div className="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
+                  <div>
+                    <p className="text-sm font-medium text-amber-700 dark:text-amber-400">Video is being processed</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">Downloading and converting to HLS. This page will refresh automatically.</p>
                   </div>
-                </CardContent>
-              </Card>
-            );
-            if (video.sourceType === "s3" || video.sourceType === "upload" || video.sourceType === "local") return (
-              <Card className="border border-card-border">
-                <CardHeader className="pb-2"><CardTitle className="text-base">Video Preview</CardTitle></CardHeader>
-                <CardContent>
-                  <a
-                    href={`/embed/${video.publicId}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-2 text-sm text-primary hover:underline"
-                  >
-                    <ExternalLink className="h-4 w-4" />Open player in new tab
-                  </a>
-                </CardContent>
-              </Card>
-            );
-            if (video.sourceUrl) return (
-              <Card className="border border-card-border">
-                <CardHeader className="pb-2"><CardTitle className="text-base">Video Preview</CardTitle></CardHeader>
-                <CardContent>
-                  <a href={video.sourceUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-sm text-primary hover:underline">
-                    <ExternalLink className="h-4 w-4" />Open source URL
-                  </a>
-                </CardContent>
-              </Card>
-            );
-            return null;
-          })()}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Error state */}
+          {video.status === "error" && (
+            <Card className="border border-destructive/30 bg-destructive/5">
+              <CardContent className="pt-5">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="h-5 w-5 shrink-0 text-destructive mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-destructive">Processing failed</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">{(video as any).lastError || "An error occurred during video processing."}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Video preview link (only when ready) */}
+          {video.status === "ready" && (
+            <Card className="border border-card-border">
+              <CardHeader className="pb-2"><CardTitle className="text-base">Video Preview</CardTitle></CardHeader>
+              <CardContent>
+                <a
+                  href={`/embed/${video.publicId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 text-sm text-primary hover:underline"
+                  data-testid="link-open-player"
+                >
+                  <ExternalLink className="h-4 w-4" />Open player in new tab
+                </a>
+              </CardContent>
+            </Card>
+          )}
 
           <Card className="border border-card-border">
             <CardHeader><CardTitle className="text-base">Video Information</CardTitle></CardHeader>

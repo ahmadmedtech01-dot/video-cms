@@ -13,7 +13,7 @@ import { Progress } from "@/components/ui/progress";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Upload, Link as LinkIcon, Youtube, Video, X, CloudUpload, CheckCircle, AlertCircle } from "lucide-react";
+import { Upload, Link as LinkIcon, X, CloudUpload, CheckCircle, AlertCircle, Info, Video } from "lucide-react";
 
 const QUALITY_OPTIONS = [
   { value: 240, label: "240p" },
@@ -23,14 +23,22 @@ const QUALITY_OPTIONS = [
   { value: 1080, label: "1080p (Full HD)" },
 ];
 
-const SOURCE_TYPES = [
-  { value: "youtube", label: "YouTube", icon: Youtube, placeholder: "https://youtube.com/watch?v=..." },
-  { value: "vimeo", label: "Vimeo", icon: Video, placeholder: "https://vimeo.com/..." },
-  { value: "drive", label: "Google Drive", icon: LinkIcon, placeholder: "https://drive.google.com/..." },
-  { value: "onedrive", label: "OneDrive", icon: LinkIcon, placeholder: "https://onedrive.live.com/..." },
-  { value: "s3", label: "S3 URL", icon: LinkIcon, placeholder: "s3://bucket/path or https://..." },
-  { value: "direct", label: "Direct URL", icon: LinkIcon, placeholder: "https://example.com/video.mp4" },
-];
+function detectUrlType(url: string): { type: "youtube" | "vimeo" | "m3u8" | "mp4" | "direct" | ""; label: string; description: string; blocked: boolean } {
+  if (!url.trim()) return { type: "", label: "", description: "", blocked: false };
+  if (/(?:youtube\.com|youtu\.be)/i.test(url)) {
+    return { type: "youtube", label: "YouTube — Not Supported", description: "YouTube links cannot be played in our custom player. Please upload the video file or provide a direct HLS/MP4 URL you own.", blocked: true };
+  }
+  if (/vimeo\.com/i.test(url)) {
+    return { type: "vimeo", label: "Vimeo — Ingest Required", description: "We will download and convert this video using the Vimeo API (requires VIMEO_ACCESS_TOKEN). Your Vimeo plan must allow file downloads. This may take several minutes.", blocked: false };
+  }
+  if (/\.m3u8(\?|$)/i.test(url)) {
+    return { type: "m3u8", label: "Direct HLS Stream", description: "This .m3u8 URL will be used as-is in our player. It will be ready immediately.", blocked: false };
+  }
+  if (/\.mp4(\?|$)/i.test(url)) {
+    return { type: "mp4", label: "Direct MP4 — Will Transcode", description: "We will download this MP4 and convert it to HLS. This may take a few minutes.", blocked: false };
+  }
+  return { type: "direct", label: "Media URL — Will Transcode", description: "We will attempt to download and transcode this URL to HLS.", blocked: false };
+}
 
 export default function UploadPage() {
   const [, setLocation] = useLocation();
@@ -46,9 +54,20 @@ export default function UploadPage() {
   const [qualities, setQualities] = useState<number[]>([720]);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadState, setUploadState] = useState<"idle" | "uploading" | "processing" | "done" | "error">("idle");
-  const [sourceType, setSourceType] = useState("youtube");
   const [sourceUrl, setSourceUrl] = useState("");
   const [dragOver, setDragOver] = useState(false);
+
+  const urlInfo = detectUrlType(sourceUrl);
+
+  const importMutation = useMutation({
+    mutationFn: async (data: any) => {
+      const res = await apiRequest("POST", "/api/videos/import", data);
+      return res.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/videos"] });
+    },
+  });
 
   const createVideoMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -130,25 +149,18 @@ export default function UploadPage() {
   };
 
   const handleImport = async () => {
-    if (!title.trim()) {
-      toast({ title: "Title required", variant: "destructive" });
-      return;
-    }
-    if (!sourceUrl.trim()) {
-      toast({ title: "URL required", variant: "destructive" });
-      return;
-    }
-
+    if (!title.trim()) { toast({ title: "Title required", variant: "destructive" }); return; }
+    if (!sourceUrl.trim()) { toast({ title: "URL required", variant: "destructive" }); return; }
+    if (urlInfo.blocked) { toast({ title: "URL not supported", description: urlInfo.description, variant: "destructive" }); return; }
     try {
-      const video = await createVideoMutation.mutateAsync({
+      const result = await importMutation.mutateAsync({
         title, description, author,
         tags: tags ? tags.split(",").map(t => t.trim()).filter(Boolean) : [],
-        sourceType,
         sourceUrl,
       });
       qc.invalidateQueries({ queryKey: ["/api/videos"] });
-      toast({ title: "Video imported!" });
-      setLocation(`/videos/${video.id}`);
+      toast({ title: result.status === "processing" ? "Ingestion started!" : "Video imported!", description: result.status === "processing" ? "Your video is being downloaded and converted. Check the video page for progress." : undefined });
+      setLocation(`/videos/${result.videoId}`);
     } catch (e: any) {
       toast({ title: "Import failed", description: e.message, variant: "destructive" });
     }
@@ -300,47 +312,55 @@ export default function UploadPage() {
             </TabsContent>
 
             <TabsContent value="import" className="space-y-4">
-              <div className="space-y-2">
-                <Label>Source Platform</Label>
-                <Select value={sourceType} onValueChange={setSourceType}>
-                  <SelectTrigger data-testid="select-source-type">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {SOURCE_TYPES.map(s => (
-                      <SelectItem key={s.value} value={s.value}>
-                        <div className="flex items-center gap-2">
-                          <s.icon className="h-4 w-4" />
-                          {s.label}
-                        </div>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
               <div className="space-y-1.5">
                 <Label>Video URL</Label>
                 <Input
                   value={sourceUrl}
                   onChange={e => setSourceUrl(e.target.value)}
-                  placeholder={SOURCE_TYPES.find(s => s.value === sourceType)?.placeholder}
+                  placeholder="https://vimeo.com/123456, https://cdn.example.com/video.mp4, or https://cdn.example.com/master.m3u8"
                   data-testid="input-source-url"
                 />
               </div>
-              <div className="rounded-lg border border-border bg-muted/40 p-3">
-                <p className="text-xs text-muted-foreground">
-                  For YouTube, Vimeo, and Drive: the video URL will be used to render the player.
-                  For S3 and direct URLs: HLS processing will be attempted if ffmpeg is available.
-                </p>
-              </div>
+
+              {/* URL type detection feedback */}
+              {urlInfo.type && (
+                <div className={`flex gap-2.5 rounded-lg border p-3 text-sm ${
+                  urlInfo.blocked
+                    ? "border-destructive/50 bg-destructive/10 text-destructive dark:text-red-400"
+                    : urlInfo.type === "m3u8"
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                    : "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-400"
+                }`} data-testid="url-detection-banner">
+                  {urlInfo.blocked
+                    ? <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                    : urlInfo.type === "m3u8"
+                    ? <CheckCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                    : <Info className="h-4 w-4 mt-0.5 shrink-0" />
+                  }
+                  <div>
+                    <p className="font-medium">{urlInfo.label}</p>
+                    <p className="opacity-80 text-xs mt-0.5">{urlInfo.description}</p>
+                  </div>
+                </div>
+              )}
+
+              {!urlInfo.type && (
+                <div className="rounded-lg border border-border bg-muted/40 p-3">
+                  <p className="text-xs text-muted-foreground">
+                    Supported: Vimeo links (requires Vimeo Pro API token), direct .mp4 or .m3u8 URLs.
+                    YouTube links are not supported — please upload the file directly.
+                  </p>
+                </div>
+              )}
+
               <Button
                 onClick={handleImport}
-                disabled={createVideoMutation.isPending}
+                disabled={importMutation.isPending || urlInfo.blocked}
                 className="w-full"
                 data-testid="button-import"
               >
                 <LinkIcon className="h-4 w-4 mr-1.5" />
-                {createVideoMutation.isPending ? "Importing..." : "Import Video"}
+                {importMutation.isPending ? "Importing..." : "Import Video"}
               </Button>
             </TabsContent>
           </Tabs>

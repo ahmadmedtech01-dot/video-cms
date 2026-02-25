@@ -51,37 +51,86 @@ async function getS3Config() {
   };
 }
 
-// ── Vimeo URL resolver ─────────────────────────────────────
-async function resolveVimeoHls(vimeoUrl: string): Promise<string | null> {
+// ── Ingest helpers ─────────────────────────────────────────
+
+async function downloadToTempFile(url: string, headers: Record<string, string> = {}): Promise<string> {
+  const response = await fetch(url, { headers });
+  if (!response.ok) throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+  if (!response.body) throw new Error("No response body");
+  const { pipeline } = await import("stream/promises");
+  const { Readable } = await import("stream");
+  const tmpPath = path.join(os.tmpdir(), `vcms-ingest-${nanoid()}.mp4`);
+  const fileStream = fs.createWriteStream(tmpPath);
+  await pipeline(Readable.fromWeb(response.body as any), fileStream);
+  return tmpPath;
+}
+
+async function transcodeAndStoreHls(videoId: string, inputPath: string, qualities: number[]): Promise<void> {
+  const hlsOutputDir = path.join(os.tmpdir(), "vcms-hls", videoId);
+  await runFfmpegHls(inputPath, hlsOutputDir, qualities);
+  const client = await getS3Client();
+  const cfg = await getS3Config();
+  if (client && cfg.bucket) {
+    const hlsPrefix = `${cfg.hlsPrefix}${videoId}/`;
+    await uploadHlsToS3(hlsOutputDir, hlsPrefix);
+    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: hlsPrefix, lastError: null });
+    try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
+  } else {
+    const localHlsDir = path.join(uploadDir, "hls", videoId);
+    if (fs.existsSync(localHlsDir)) fs.rmSync(localHlsDir, { recursive: true });
+    fs.cpSync(hlsOutputDir, localHlsDir, { recursive: true });
+    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: localHlsDir, lastError: null });
+    try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
+  }
+  log(`Ingest/transcode complete for video ${videoId}`);
+}
+
+async function ingestDirectMp4(videoId: string, url: string): Promise<void> {
+  log(`Ingesting direct URL for video ${videoId}: ${url}`);
+  const tmpPath = await downloadToTempFile(url);
   try {
-    const parsed = new URL(vimeoUrl);
-    const m = parsed.pathname.match(/\/(\d+)/);
-    if (!m) return null;
-    const videoId = m[1];
-    const cfgRes = await fetch(`https://player.vimeo.com/video/${videoId}/config`, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://player.vimeo.com/",
-        "Accept": "application/json",
-      },
-    });
-    if (!cfgRes.ok) return null;
-    const cfg = await cfgRes.json() as any;
-    // Try HLS first
-    const hls = cfg?.request?.files?.hls?.cdns;
-    if (hls) {
-      const cdn = Object.values(hls)[0] as any;
-      if (cdn?.url) return cdn.url;
-    }
-    // Fallback: progressive
-    const progressive: any[] = cfg?.request?.files?.progressive || [];
-    if (progressive.length) {
-      progressive.sort((a: any, b: any) => (b.height || 0) - (a.height || 0));
-      return progressive[0].url || null;
-    }
-    return null;
-  } catch {
-    return null;
+    await transcodeAndStoreHls(videoId, tmpPath, [720, 480, 360]);
+  } finally {
+    try { fs.rmSync(tmpPath); } catch {}
+  }
+}
+
+async function ingestVimeoVideo(videoId: string, vimeoUrl: string): Promise<void> {
+  const vimeoToken = process.env.VIMEO_ACCESS_TOKEN || (await storage.getSetting("vimeo_access_token")) || "";
+  if (!vimeoToken) {
+    throw new Error("Vimeo access token not configured. Set VIMEO_ACCESS_TOKEN in environment variables or add vimeo_access_token in System Settings.");
+  }
+  const m = vimeoUrl.match(/vimeo\.com\/(?:video\/)?(\d+)/);
+  if (!m) throw new Error("Could not parse Vimeo video ID from URL");
+  const vimeoVideoId = m[1];
+
+  log(`Calling Vimeo API for video ID ${vimeoVideoId}...`);
+  const apiRes = await fetch(`https://api.vimeo.com/videos/${vimeoVideoId}`, {
+    headers: {
+      Authorization: `Bearer ${vimeoToken}`,
+      Accept: "application/vnd.vimeo.*+json;version=3.4",
+    },
+  });
+  if (!apiRes.ok) {
+    const err = await apiRes.json().catch(() => ({})) as any;
+    throw new Error(`Vimeo API error (${apiRes.status}): ${err.error || err.message || "Unknown"}`);
+  }
+  const vimeoData = await apiRes.json() as any;
+
+  const downloads: any[] = vimeoData.download || [];
+  if (!downloads.length) {
+    throw new Error("Vimeo file not available for download. Your Vimeo plan or video privacy settings do not expose download links. Please upgrade to Vimeo Pro or upload the file directly.");
+  }
+  downloads.sort((a: any, b: any) => (b.height || 0) - (a.height || 0));
+  const best = downloads[0];
+  if (!best?.link) throw new Error("No download link returned by Vimeo API");
+
+  log(`Downloading Vimeo video ${vimeoVideoId} (${best.quality || "unknown"} quality)...`);
+  const tmpPath = await downloadToTempFile(best.link, { Authorization: `Bearer ${vimeoToken}` });
+  try {
+    await transcodeAndStoreHls(videoId, tmpPath, [720, 480, 360]);
+  } finally {
+    try { fs.rmSync(tmpPath); } catch {}
   }
 }
 
@@ -330,6 +379,73 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json({ ok: true });
   });
 
+  // ── Import endpoint (ingest & convert) ───────────────────
+  app.post("/api/videos/import", requireAuth, async (req, res) => {
+    try {
+      const { sourceUrl, title, description, author, tags } = req.body;
+      if (!sourceUrl?.trim()) return res.status(400).json({ message: "sourceUrl is required" });
+
+      const url = sourceUrl.trim();
+      const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(url);
+      const isVimeo = /vimeo\.com/i.test(url);
+      const isM3u8 = /\.m3u8(\?|$)/i.test(url);
+
+      let sourceType: string;
+      let initialStatus: string;
+      let lastError: string | null = null;
+
+      if (isYouTube) {
+        sourceType = "youtube_blocked";
+        initialStatus = "error";
+        lastError = "YouTube links cannot be played in our custom player. Please upload the video file or provide a direct HLS (.m3u8) or MP4 URL.";
+      } else if (isVimeo) {
+        sourceType = "vimeo_ingest";
+        initialStatus = "processing";
+      } else if (isM3u8) {
+        sourceType = "direct_url";
+        initialStatus = "ready";
+      } else {
+        sourceType = "direct_url";
+        initialStatus = "processing";
+      }
+
+      const publicId = nanoid(10);
+      const video = await storage.createVideo({
+        title: title || "Untitled Video",
+        description: description || "",
+        author: author || "",
+        tags: tags || [],
+        publicId,
+        status: initialStatus,
+        sourceType,
+        sourceUrl: url,
+        available: true,
+        lastError,
+      } as any);
+
+      await storage.upsertPlayerSettings(video.id, {});
+      await storage.upsertWatermarkSettings(video.id, {});
+      await storage.upsertSecuritySettings(video.id, {});
+      await storage.createAuditLog({ action: "video_imported", meta: { videoId: video.id, sourceType, url }, ip: req.ip });
+
+      if (sourceType === "vimeo_ingest") {
+        ingestVimeoVideo(video.id, url).catch(async (e: Error) => {
+          log(`Vimeo ingest failed for ${video.id}: ${e.message}`);
+          await storage.updateVideo(video.id, { status: "error", lastError: e.message } as any);
+        });
+      } else if (sourceType === "direct_url" && initialStatus === "processing") {
+        ingestDirectMp4(video.id, url).catch(async (e: Error) => {
+          log(`Direct ingest failed for ${video.id}: ${e.message}`);
+          await storage.updateVideo(video.id, { status: "error", lastError: e.message } as any);
+        });
+      }
+
+      res.json({ videoId: video.id, publicId: video.publicId, status: video.status, message: lastError || (initialStatus === "processing" ? "Ingestion started" : "Video ready") });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.post("/api/videos/:id/toggle-availability", requireAuth, async (req, res) => {
     const v = await storage.getVideoById(req.params.id);
     if (!v) return res.status(404).json({ message: "Not found" });
@@ -528,6 +644,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const video = await storage.getVideoByPublicId(req.params.publicId);
       if (!video) return res.status(404).json({ message: "Video not found" });
       if (!video.available) return res.status(403).json({ message: "Video unavailable" });
+      if (video.status === "processing" || video.status === "uploading") {
+        return res.status(202).json({ message: "Video is being processed", status: "processing" });
+      }
+      if (video.status === "error") {
+        return res.status(400).json({ message: (video as any).lastError || "Video processing failed", status: "error" });
+      }
       if (video.status !== "ready") return res.status(400).json({ message: "Video not ready" });
 
       const secSettings = await storage.getSecuritySettings(video.id);
@@ -574,19 +696,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }
       }
 
-      // Vimeo: resolve to direct HLS stream so we can use our own player
-      if (video.sourceType === "vimeo" && video.sourceUrl) {
-        const hlsUrl = await resolveVimeoHls(video.sourceUrl);
-        if (hlsUrl) {
-          return res.json({ manifestUrl: hlsUrl, sourceType: "hls", videoId: video.id });
-        }
-        // Resolution failed — fall back to iframe (legacy)
-        return res.json({ sourceType: video.sourceType, sourceUrl: video.sourceUrl, videoId: video.id });
-      }
-
-      // For other external sources (YouTube/Drive/OneDrive/Direct)
-      if (video.sourceType !== "upload" && video.sourceUrl) {
-        return res.json({ sourceType: video.sourceType, sourceUrl: video.sourceUrl, videoId: video.id });
+      // Direct external m3u8 (admin-provided HLS stream URL)
+      if (video.sourceType === "direct_url" && video.sourceUrl && /\.m3u8/i.test(video.sourceUrl)) {
+        return res.json({ manifestUrl: video.sourceUrl, sourceType: "hls", videoId: video.id });
       }
 
       // S3-based HLS

@@ -38,6 +38,7 @@ export const videos = pgTable("videos", {
   qualities: integer("qualities").array().default(sql`'{}'::int[]`),
   duration: integer("duration"),
   fileSize: integer("file_size"),
+  lastError: text("last_error"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

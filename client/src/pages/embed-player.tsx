@@ -31,22 +31,6 @@ interface PlayerSettings {
   endTime?: number;
 }
 
-function toEmbedUrl(sourceType: string, url: string): string {
-  try {
-    if (sourceType === "youtube") {
-      const parsed = new URL(url);
-      let id = parsed.searchParams.get("v");
-      if (!id && parsed.hostname === "youtu.be") id = parsed.pathname.slice(1).split("?")[0];
-      if (id) return `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1`;
-    }
-    if (sourceType === "vimeo") {
-      const parsed = new URL(url);
-      const m = parsed.pathname.match(/\/(\d+)/);
-      if (m) return `https://player.vimeo.com/video/${m[1]}?badge=0&autopause=0&player_id=0`;
-    }
-  } catch {}
-  return url;
-}
 
 const POSITION_CLASSES: Record<string, string> = {
   "top-left": "top-3 left-3",
@@ -86,7 +70,7 @@ export default function EmbedPlayerPage() {
   const popIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const controlsTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const [status, setStatus] = useState<"loading" | "ready" | "error" | "unavailable">("loading");
+  const [status, setStatus] = useState<"loading" | "ready" | "error" | "unavailable" | "processing">("loading");
   const [errorMsg, setErrorMsg] = useState("");
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -105,8 +89,6 @@ export default function EmbedPlayerPage() {
   const [playerSettings, setPlayerSettings] = useState<PlayerSettings>({});
   const [watermarkSettings, setWatermarkSettings] = useState<WatermarkSettings>({});
   const [videoId, setVideoId] = useState("");
-  const [sourceType, setSourceType] = useState("s3");
-  const [externalUrl, setExternalUrl] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [tickerOffset, setTickerOffset] = useState(0);
 
@@ -121,6 +103,11 @@ export default function EmbedPlayerPage() {
           headers: referrer ? { "x-embed-referrer": referrer } : {},
         });
 
+        if (manifestRes.status === 202) {
+          setStatus("processing");
+          return;
+        }
+
         if (!manifestRes.ok) {
           const data = await manifestRes.json().catch(() => ({}));
           if (manifestRes.status === 503) { setStatus("unavailable"); return; }
@@ -132,13 +119,8 @@ export default function EmbedPlayerPage() {
 
         const data = await manifestRes.json();
         setVideoId(data.videoId || publicId);
-        setSourceType(data.sourceType || "s3");
 
-        // Load video details for settings
-        const detailRes = await fetch(`/api/player/${publicId}/manifest${qs}`);
-        const detail = await detailRes.json().catch(() => ({}));
-
-        // Fetch video settings (if accessible)
+        // Fetch video settings
         try {
           const settingsRes = await fetch(`/api/player/${publicId}/settings${qs}`);
           if (settingsRes.ok) {
@@ -157,14 +139,6 @@ export default function EmbedPlayerPage() {
         if (pingRes.ok) {
           const pingData = await pingRes.json();
           if (pingData.sessionCode) setSessionCode(pingData.sessionCode);
-        }
-
-        // External source (iframe) — Vimeo is now resolved to HLS on server
-        const isOurPlayer = data.sourceType === "s3" || data.sourceType === "local" || data.sourceType === "hls";
-        if (!isOurPlayer && data.sourceUrl) {
-          setExternalUrl(data.sourceUrl);
-          setStatus("ready");
-          return;
         }
 
         const manifestUrl = data.manifestUrl;
@@ -344,10 +318,22 @@ export default function EmbedPlayerPage() {
     );
   }
 
+  if (status === "processing") {
+    return (
+      <div className="flex h-screen items-center justify-center bg-black text-white">
+        <div className="text-center space-y-3">
+          <div className="h-10 w-10 animate-spin rounded-full border-2 border-white border-t-transparent mx-auto" />
+          <p className="text-lg font-semibold">Processing Video</p>
+          <p className="text-sm opacity-60">Your video is being ingested and converted to HLS. Please check back in a few minutes.</p>
+        </div>
+      </div>
+    );
+  }
+
   if (status === "error") {
     return (
       <div className="flex h-screen items-center justify-center bg-black text-white">
-        <div className="text-center space-y-2">
+        <div className="text-center space-y-2 max-w-sm px-4">
           <div className="text-4xl">⚠️</div>
           <p className="text-lg font-semibold">Playback Error</p>
           <p className="text-sm opacity-60">{errorMsg || "Could not load video."}</p>
@@ -362,44 +348,13 @@ export default function EmbedPlayerPage() {
 
   return (
     <div className="bg-black w-full h-screen flex items-center justify-center overflow-hidden">
-      {/* External source (YouTube/Drive/Direct — iframe with our watermarks overlaid) */}
-      {sourceType !== "s3" && sourceType !== "local" && sourceType !== "hls" && externalUrl ? (
-        <div className="relative w-full h-full">
-          <iframe
-            src={toEmbedUrl(sourceType, externalUrl)}
-            className="w-full h-full border-0"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-            allowFullScreen
-          />
-          {/* Watermark overlay on top of iframe */}
-          <div className="absolute inset-0 pointer-events-none overflow-hidden">
-            {ws.logoEnabled && ws.logoUrl && (
-              <div className={`absolute ${POSITION_CLASSES[ws.logoPosition || "top-right"]}`} style={{ opacity: ws.logoOpacity ?? 0.8 }}>
-                <img src={ws.logoUrl} alt="" className="h-8 max-w-[120px] object-contain" />
-              </div>
-            )}
-            {ws.tickerEnabled && ws.tickerText && (
-              <div className="absolute bottom-12 left-0 right-0 overflow-hidden" style={{ opacity: ws.tickerOpacity ?? 0.7 }}>
-                <div className="whitespace-nowrap text-white text-sm font-medium py-0.5 px-2 bg-black/40" style={{ transform: `translateX(${tickerOffset % (tickerText.length * 12 + 800)}px)` }}>
-                  {tickerText} &nbsp;&nbsp;&nbsp;&nbsp;{tickerText}
-                </div>
-              </div>
-            )}
-            {ws.popEnabled && popVisible && (
-              <div className={`absolute text-white text-sm font-semibold px-2 py-1 rounded bg-black/50 ${popPosition}`} style={{ opacity: ws.popOpacity ?? 0.8 }}>
-                {popText}
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div
-          ref={playerContainerRef}
-          className="relative w-full h-full select-none"
-          onMouseMove={showControlsTemporarily}
-          onMouseLeave={() => playing && setShowControls(false)}
-          onClick={togglePlay}
-        >
+      <div
+        ref={playerContainerRef}
+        className="relative w-full h-full select-none"
+        onMouseMove={showControlsTemporarily}
+        onMouseLeave={() => playing && setShowControls(false)}
+        onClick={togglePlay}
+      >
           {/* Video Element */}
           <video
             ref={videoRef}
@@ -559,7 +514,6 @@ export default function EmbedPlayerPage() {
             </div>
           </div>
         </div>
-      )}
     </div>
   );
 }
