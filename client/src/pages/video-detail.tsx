@@ -285,6 +285,13 @@ export default function VideoDetailPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/videos", id] }),
   });
 
+  // Must be before early returns — hooks cannot be called conditionally
+  useEffect(() => {
+    if (videoData?.playerSettings) {
+      setLocalPs(videoData.playerSettings);
+    }
+  }, [videoData?.playerSettings]);
+
   if (isLoading) {
     return (
       <div className="p-6 space-y-4">
@@ -307,11 +314,6 @@ export default function VideoDetailPage() {
   const video = videoData;
   const ps = video.playerSettings || {};
   const ws = video.watermarkSettings || {};
-
-  // Keep localPs in sync with saved settings (updates after each save)
-  useEffect(() => {
-    setLocalPs(video.playerSettings || {});
-  }, [video.playerSettings]);
   const ss = video.securitySettings || {};
   const firstToken = tokens.find(t => !t.revoked);
   const embedSrc = firstToken
