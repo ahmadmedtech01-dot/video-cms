@@ -250,6 +250,8 @@ export default function VideoDetailPage() {
   const [localPs, setLocalPs] = useState<PlayerSettings>({});
   const [localWs, setLocalWs] = useState<Record<string, any>>({});
   const [localSs, setLocalSs] = useState<Record<string, any>>({});
+  const [previewToken, setPreviewToken] = useState("");
+  const [previewKey, setPreviewKey] = useState(0);
 
   const { data: videoData, isLoading } = useQuery({
     queryKey: ["/api/videos", id],
@@ -273,19 +275,25 @@ export default function VideoDetailPage() {
     onError: () => toast({ title: "Save failed", variant: "destructive" }),
   });
 
+  const refreshPreview = () => {
+    if (!id) return;
+    fetch(`/api/videos/${id}/admin-preview-token`, { credentials: "include" })
+      .then(r => r.json()).then(d => { if (d.token) { setPreviewToken(d.token); setPreviewKey(k => k + 1); } }).catch(() => {});
+  };
+
   const updatePlayer = useMutation({
     mutationFn: (data: any) => apiRequest("PUT", `/api/videos/${id}/player-settings`, data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/videos", id] }); toast({ title: "Player settings saved" }); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/videos", id] }); toast({ title: "Player settings saved" }); refreshPreview(); },
   });
 
   const updateWatermark = useMutation({
     mutationFn: (data: any) => apiRequest("PUT", `/api/videos/${id}/watermark-settings`, data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/videos", id] }); toast({ title: "Watermark settings saved" }); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/videos", id] }); toast({ title: "Watermark settings saved" }); refreshPreview(); },
   });
 
   const updateSecurity = useMutation({
     mutationFn: (data: any) => apiRequest("PUT", `/api/videos/${id}/security-settings`, data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/videos", id] }); toast({ title: "Security settings saved" }); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/videos", id] }); toast({ title: "Security settings saved" }); refreshPreview(); },
   });
 
   const createToken = useMutation({
@@ -323,6 +331,12 @@ export default function VideoDetailPage() {
     if (videoData?.watermarkSettings) setLocalWs(videoData.watermarkSettings);
     if (videoData?.securitySettings) setLocalSs(videoData.securitySettings);
   }, [videoData?.playerSettings, videoData?.watermarkSettings, videoData?.securitySettings]);
+
+  useEffect(() => {
+    if (!id) return;
+    fetch(`/api/videos/${id}/admin-preview-token`, { credentials: "include" })
+      .then(r => r.json()).then(d => { if (d.token) setPreviewToken(d.token); }).catch(() => {});
+  }, [id]);
 
   if (isLoading) {
     return (
@@ -367,9 +381,9 @@ export default function VideoDetailPage() {
 
   return (
     <>
-    <div className="p-6 space-y-5 max-w-5xl">
+    <div className="p-6 max-w-[1400px]">
       {/* Header */}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
+      <div className="flex items-start justify-between gap-4 flex-wrap mb-5">
         <div className="flex items-center gap-3">
           <Button size="icon" variant="ghost" asChild><Link href="/library"><ArrowLeft className="h-4 w-4" /></Link></Button>
           <div>
@@ -388,7 +402,7 @@ export default function VideoDetailPage() {
         <div className="flex gap-2">
           <Button size="sm" variant="outline" asChild>
             <a href={`/embed/${video.publicId}`} target="_blank" rel="noopener noreferrer">
-              <ExternalLink className="h-3.5 w-3.5 mr-1" />Preview
+              <ExternalLink className="h-3.5 w-3.5 mr-1" />Open Player
             </a>
           </Button>
           <Button size="sm" variant={video.available ? "outline" : "default"} onClick={() => toggle.mutate()}>
@@ -397,6 +411,9 @@ export default function VideoDetailPage() {
         </div>
       </div>
 
+      <div className="flex gap-6 items-start">
+        {/* Left: tabs */}
+        <div className="flex-1 min-w-0">
       <Tabs defaultValue="overview">
         <TabsList className="flex-wrap h-auto gap-1">
           <TabsTrigger value="overview" data-testid="tab-overview"><Video className="h-3.5 w-3.5 mr-1" />Overview</TabsTrigger>
@@ -905,7 +922,39 @@ export default function VideoDetailPage() {
           </Card>
         </TabsContent>
       </Tabs>
-    </div>
+        </div>{/* end flex-1 left column */}
+
+        {/* Right: sticky live preview panel */}
+        <div className="w-[360px] flex-shrink-0 hidden lg:block">
+          <div className="sticky top-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-semibold text-foreground">Live Preview</span>
+              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs gap-1" onClick={refreshPreview} data-testid="button-refresh-preview">
+                <RefreshCw className="h-3 w-3" />Refresh
+              </Button>
+            </div>
+            <Card className="border border-card-border overflow-hidden bg-black">
+              <div className="relative" style={{ paddingBottom: "56.25%" }}>
+                {previewToken ? (
+                  <iframe
+                    key={previewKey}
+                    src={`/embed/${video.publicId}?token=${previewToken}`}
+                    className="absolute inset-0 w-full h-full border-0"
+                    allow="autoplay; fullscreen"
+                    title="Video Preview"
+                  />
+                ) : (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/80">
+                    <div className="h-6 w-6 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  </div>
+                )}
+              </div>
+            </Card>
+            <p className="text-xs text-muted-foreground text-center">Preview reflects saved settings. Click Refresh after saving changes.</p>
+          </div>
+        </div>
+      </div>{/* end flex row */}
+    </div>{/* end page container */}
 
     {/* Token creation dialog rendered at top-level so it works from any tab */}
     <Dialog open={tokenDialogOpen} onOpenChange={setTokenDialogOpen}>

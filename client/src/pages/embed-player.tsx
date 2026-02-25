@@ -159,8 +159,9 @@ export default function EmbedPlayerPage() {
           if (pingData.sessionCode) setSessionCode(pingData.sessionCode);
         }
 
-        // External source
-        if (data.sourceType !== "s3" && data.sourceType !== "local" && data.sourceUrl) {
+        // External source (iframe) — Vimeo is now resolved to HLS on server
+        const isOurPlayer = data.sourceType === "s3" || data.sourceType === "local" || data.sourceType === "hls";
+        if (!isOurPlayer && data.sourceUrl) {
           setExternalUrl(data.sourceUrl);
           setStatus("ready");
           return;
@@ -361,14 +362,36 @@ export default function EmbedPlayerPage() {
 
   return (
     <div className="bg-black w-full h-screen flex items-center justify-center overflow-hidden">
-      {/* External source (YouTube/Vimeo/Drive) */}
-      {sourceType !== "s3" && sourceType !== "local" && externalUrl ? (
-        <iframe
-          src={toEmbedUrl(sourceType, externalUrl)}
-          className="w-full h-full"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-          allowFullScreen
-        />
+      {/* External source (YouTube/Drive/Direct — iframe with our watermarks overlaid) */}
+      {sourceType !== "s3" && sourceType !== "local" && sourceType !== "hls" && externalUrl ? (
+        <div className="relative w-full h-full">
+          <iframe
+            src={toEmbedUrl(sourceType, externalUrl)}
+            className="w-full h-full border-0"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            allowFullScreen
+          />
+          {/* Watermark overlay on top of iframe */}
+          <div className="absolute inset-0 pointer-events-none overflow-hidden">
+            {ws.logoEnabled && ws.logoUrl && (
+              <div className={`absolute ${POSITION_CLASSES[ws.logoPosition || "top-right"]}`} style={{ opacity: ws.logoOpacity ?? 0.8 }}>
+                <img src={ws.logoUrl} alt="" className="h-8 max-w-[120px] object-contain" />
+              </div>
+            )}
+            {ws.tickerEnabled && ws.tickerText && (
+              <div className="absolute bottom-12 left-0 right-0 overflow-hidden" style={{ opacity: ws.tickerOpacity ?? 0.7 }}>
+                <div className="whitespace-nowrap text-white text-sm font-medium py-0.5 px-2 bg-black/40" style={{ transform: `translateX(${tickerOffset % (tickerText.length * 12 + 800)}px)` }}>
+                  {tickerText} &nbsp;&nbsp;&nbsp;&nbsp;{tickerText}
+                </div>
+              </div>
+            )}
+            {ws.popEnabled && popVisible && (
+              <div className={`absolute text-white text-sm font-semibold px-2 py-1 rounded bg-black/50 ${popPosition}`} style={{ opacity: ws.popOpacity ?? 0.8 }}>
+                {popText}
+              </div>
+            )}
+          </div>
+        </div>
       ) : (
         <div
           ref={playerContainerRef}

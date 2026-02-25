@@ -51,6 +51,40 @@ async function getS3Config() {
   };
 }
 
+// ── Vimeo URL resolver ─────────────────────────────────────
+async function resolveVimeoHls(vimeoUrl: string): Promise<string | null> {
+  try {
+    const parsed = new URL(vimeoUrl);
+    const m = parsed.pathname.match(/\/(\d+)/);
+    if (!m) return null;
+    const videoId = m[1];
+    const cfgRes = await fetch(`https://player.vimeo.com/video/${videoId}/config`, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://player.vimeo.com/",
+        "Accept": "application/json",
+      },
+    });
+    if (!cfgRes.ok) return null;
+    const cfg = await cfgRes.json() as any;
+    // Try HLS first
+    const hls = cfg?.request?.files?.hls?.cdns;
+    if (hls) {
+      const cdn = Object.values(hls)[0] as any;
+      if (cdn?.url) return cdn.url;
+    }
+    // Fallback: progressive
+    const progressive: any[] = cfg?.request?.files?.progressive || [];
+    if (progressive.length) {
+      progressive.sort((a: any, b: any) => (b.height || 0) - (a.height || 0));
+      return progressive[0].url || null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function uploadToS3(localPath: string, s3Key: string, contentType: string): Promise<void> {
   const client = await getS3Client();
   if (!client) throw new Error("S3 not configured");
@@ -472,6 +506,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json({ ok: true });
   });
 
+  // ── Admin preview token ──────────────────────────────────
+  app.get("/api/videos/:id/admin-preview-token", requireAuth, async (req, res) => {
+    try {
+      const video = await storage.getVideoById(req.params.id);
+      if (!video) return res.status(404).json({ message: "Not found" });
+      const token = generateToken({ videoId: video.id, publicId: video.publicId, adminPreview: true }, 600);
+      res.json({ token, publicId: video.publicId });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   // ── Player (public) ───────────────────────────────────────
   app.get("/api/player/:publicId/manifest", async (req, res) => {
     try {
@@ -487,36 +533,58 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const secSettings = await storage.getSecuritySettings(video.id);
       const token = req.query.token as string;
 
-      // Token validation
-      if (secSettings?.tokenRequired !== false) {
-        if (!token) return res.status(401).json({ message: "Token required" });
-        const dbToken = await storage.getTokenByValue(token);
-        if (!dbToken) {
-          // Try JWT verification for freshly-generated tokens
+      // Check for admin preview token — bypasses all security checks
+      let isAdminPreview = false;
+      if (token) {
+        try {
           const decoded = verifyToken(token);
-          if (!decoded || decoded.publicId !== video.publicId) {
-            return res.status(401).json({ message: "Invalid token" });
+          if (decoded?.adminPreview === true && decoded.publicId === video.publicId) {
+            isAdminPreview = true;
           }
-        } else {
-          if (dbToken.revoked) return res.status(401).json({ message: "Token revoked" });
-          if (dbToken.expiresAt && new Date(dbToken.expiresAt) < new Date()) {
-            return res.status(401).json({ message: "Token expired" });
+        } catch {}
+      }
+
+      if (!isAdminPreview) {
+        // Token validation
+        if (secSettings?.tokenRequired !== false) {
+          if (!token) return res.status(401).json({ message: "Token required" });
+          const dbToken = await storage.getTokenByValue(token);
+          if (!dbToken) {
+            const decoded = verifyToken(token);
+            if (!decoded || decoded.publicId !== video.publicId) {
+              return res.status(401).json({ message: "Invalid token" });
+            }
+          } else {
+            if (dbToken.revoked) return res.status(401).json({ message: "Token revoked" });
+            if (dbToken.expiresAt && new Date(dbToken.expiresAt) < new Date()) {
+              return res.status(401).json({ message: "Token expired" });
+            }
+            if (dbToken.videoId !== video.id) return res.status(401).json({ message: "Token mismatch" });
           }
-          if (dbToken.videoId !== video.id) return res.status(401).json({ message: "Token mismatch" });
+        }
+
+        // Domain check
+        if (secSettings?.domainWhitelistEnabled && secSettings.allowedDomains?.length) {
+          const referer = req.headers.referer || req.headers.origin || req.headers["x-embed-referrer"] as string || "";
+          let domain = "";
+          try { domain = new URL(referer).hostname; } catch {}
+          if (domain && !secSettings.allowedDomains.includes(domain)) {
+            return res.status(403).json({ message: "Domain not allowed" });
+          }
         }
       }
 
-      // Domain check
-      if (secSettings?.domainWhitelistEnabled && secSettings.allowedDomains?.length) {
-        const referer = req.headers.referer || req.headers.origin || req.headers["x-embed-referrer"] as string || "";
-        let domain = "";
-        try { domain = new URL(referer).hostname; } catch {}
-        if (domain && !secSettings.allowedDomains.includes(domain)) {
-          return res.status(403).json({ message: "Domain not allowed" });
+      // Vimeo: resolve to direct HLS stream so we can use our own player
+      if (video.sourceType === "vimeo" && video.sourceUrl) {
+        const hlsUrl = await resolveVimeoHls(video.sourceUrl);
+        if (hlsUrl) {
+          return res.json({ manifestUrl: hlsUrl, sourceType: "hls", videoId: video.id });
         }
+        // Resolution failed — fall back to iframe (legacy)
+        return res.json({ sourceType: video.sourceType, sourceUrl: video.sourceUrl, videoId: video.id });
       }
 
-      // For external sources (YouTube/Vimeo/Drive/OneDrive)
+      // For other external sources (YouTube/Drive/OneDrive/Direct)
       if (video.sourceType !== "upload" && video.sourceUrl) {
         return res.json({ sourceType: video.sourceType, sourceUrl: video.sourceUrl, videoId: video.id });
       }
