@@ -12,12 +12,12 @@ function resolveSecret(): string {
 const SECRET = resolveSecret();
 
 const ABUSE_THRESHOLDS = {
-  requestsPerWindow: 25,
+  requestsPerWindow: 50,
   requestWindowMs: 5000,
-  concurrentSegments: 3,
-  playlistFetchesPerMin: 30,
-  keyHitsPerMin: 60,
-  scoreToRevoke: 10,
+  concurrentSegments: 6,
+  playlistFetchesPerMin: 60,
+  keyHitsPerMin: 120,
+  scoreToRevoke: 15,
   windowSize: 6,
   outOfWindowPenalty: 3,
 };
