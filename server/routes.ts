@@ -1371,16 +1371,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
     const session = getSession(sid);
     if (!session || session.revoked) return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Session revoked" });
-    if (!verifySignedPath(sid, "/key", parseInt(exp, 10), st)) {
-      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Invalid key token" });
+
+    const reqUa = req.headers["user-agent"] || "";
+    const reqDh = session.deviceHash ? computeDeviceHash(reqUa) : undefined;
+
+    if (session.deviceHash && reqDh !== session.deviceHash) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Device mismatch" });
     }
 
-    if (session.deviceHash) {
-      const reqUa = req.headers["user-agent"] || "";
-      const reqDh = computeDeviceHash(reqUa);
-      if (reqDh !== session.deviceHash) {
-        return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Device mismatch" });
-      }
+    if (!verifySignedPath(sid, "/key", parseInt(exp, 10), st, session.deviceHash || undefined)) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Invalid key token" });
     }
 
     const keyIp = (req.headers["x-forwarded-for"] as string || req.ip || "").split(",")[0].trim();
