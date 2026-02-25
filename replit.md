@@ -37,6 +37,16 @@ A full-stack secure video content management system for a single admin user.
 - `/v/:publicId?token=...` — masked share link page
 - Both support: hls.js playback, watermark overlays, token validation, domain checking
 
+### Video Security Pipeline (Non-DRM)
+Secure HLS proxy — B2/S3 origin URLs are **never** sent to the frontend:
+- `GET /api/player/:publicId/manifest` creates an in-memory `VideoSession` and returns a signed proxy URL
+- `GET /hls/:publicId/*` — fetches playlists server-side, rewrites all URLs to proxy with HMAC tokens + 30s expiry for variants
+- `GET /seg/:publicId/*` — fetches segment bytes from B2/S3, streams with 15s signed tokens
+- `GET /key/:publicId` — AES-128 key endpoint (ready for when ffmpeg encryption is enabled)
+- `POST /api/video/session` — alternative session creation endpoint for custom players
+- Abuse detection: sessions revoked after >25 requests in 5s; frontend shows "Video playback denied" overlay
+- Signing secret: auto-derived from `SESSION_SECRET`; override with `SIGNING_SECRET` env var
+
 ## Database Tables
 
 - `admin_users` — single admin account

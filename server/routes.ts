@@ -13,6 +13,7 @@ import { spawn } from "child_process";
 import os from "os";
 import { vimeoFetchVideo, vimeoExtractFileLinks, vimeoDiagnoseNoFileAccess } from "./vimeo";
 import { makeB2Client, b2PresignGetObject, b2UploadFile } from "./b2";
+import { createSession, getSession, revokeSession, verifySignedPath, trackRequest, buildSignedProxyUrl, signPath } from "./video-session";
 
 function log(message: string) {
   const t = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true });
@@ -868,9 +869,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         : await storage.getActiveStorageConnection();
       if (conn?.provider === "backblaze_b2") {
         const cfg = conn.config as any;
-        const masterKey = `${hlsPrefix}master.m3u8`;
-        const signedUrl = await b2PresignGetObject(cfg.bucket, masterKey, cfg.endpoint, ttl);
-        return res.json({ manifestUrl: signedUrl, sourceType: "b2" });
+        // Route through secure proxy — never expose B2 origin URL to frontend
+        const sid = createSession(video.publicId, hlsPrefix, "backblaze_b2", cfg, conn.id);
+        const proxyBase = `/hls/${video.publicId}/master.m3u8`;
+        const manifestUrl = buildSignedProxyUrl(proxyBase, sid, "/master.m3u8", 60);
+        return res.json({ manifestUrl, sourceType: "b2_proxy", sessionId: sid });
       }
 
       // Legacy S3-based HLS
@@ -878,9 +881,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const s3cfg = await getS3Config();
 
       if (client && s3cfg.bucket) {
-        const masterKey = `${hlsPrefix}master.m3u8`;
-        const signedMasterUrl = await generateSignedS3Url(masterKey, ttl);
-        return res.json({ manifestUrl: signedMasterUrl, sourceType: "s3" });
+        // Route through secure proxy for S3 too
+        const sid = createSession(video.publicId, hlsPrefix, "s3", s3cfg, null);
+        const proxyBase = `/hls/${video.publicId}/master.m3u8`;
+        const manifestUrl = buildSignedProxyUrl(proxyBase, sid, "/master.m3u8", 60);
+        return res.json({ manifestUrl, sourceType: "s3_proxy", sessionId: sid });
       }
 
       // Local HLS fallback
@@ -918,6 +923,242 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.setHeader("Content-Type", contentType);
     res.setHeader("Access-Control-Allow-Origin", "*");
     fs.createReadStream(fullPath).pipe(res);
+  });
+
+  // ── Secure HLS Playlist Proxy ────────────────────────────────────────────────
+  // Serves master and variant playlists with per-request signed URLs.
+  // B2 / S3 origin URLs are NEVER exposed to the frontend.
+  app.use("/hls/:publicId", async (req: any, res: any, next: any) => {
+    const { sid, st, exp } = req.query as Record<string, string>;
+    const subPath = req.path as string; // e.g. "/master.m3u8" or "/720p/prog_index.m3u8"
+
+    // Validate required params
+    if (!sid || !st || !exp) return res.status(401).json({ code: "PLAYBACK_DENIED", message: "Missing auth params" });
+
+    // Look up session
+    const session = getSession(sid);
+    if (!session || session.revoked) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Session expired or revoked" });
+    }
+    if (session.publicId !== req.params.publicId) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Session mismatch" });
+    }
+
+    // Verify HMAC signature + expiry
+    if (!verifySignedPath(sid, subPath, parseInt(exp, 10), st)) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Invalid or expired token" });
+    }
+
+    // Rate-limit check
+    const { abused } = trackRequest(sid);
+    if (abused) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Video playback denied due to suspicious activity" });
+    }
+
+    try {
+      const { hlsPrefix, storageProvider, storageConfig, connId } = session;
+      // Build the B2/S3 key: strip leading slash from subPath
+      const fileKey = hlsPrefix + subPath.replace(/^\//, "");
+
+      // Fetch playlist from origin server-side
+      let originUrl: string;
+      if (storageProvider === "backblaze_b2") {
+        originUrl = await b2PresignGetObject(storageConfig.bucket, fileKey, storageConfig.endpoint, 30);
+      } else {
+        // S3
+        const client = await getS3Client();
+        const s3cfg = await getS3Config();
+        if (!client || !s3cfg.bucket) return res.status(500).json({ message: "Storage not configured" });
+        const cmd = new GetObjectCommand({ Bucket: s3cfg.bucket, Key: fileKey });
+        originUrl = await getSignedUrl(client, cmd, { expiresIn: 30 });
+      }
+
+      const fetchRes = await fetch(originUrl);
+      if (!fetchRes.ok) return res.status(404).json({ message: "Playlist not found" });
+
+      const playlistText = await fetchRes.text();
+
+      // Rewrite all relative URLs in the playlist to our secure proxy
+      const variantDir = path.posix.dirname(subPath); // e.g. "/720p" for "/720p/prog_index.m3u8"
+      const publicId = req.params.publicId;
+
+      const rewritten = playlistText.split("\n").map(line => {
+        const trimmed = line.trim();
+
+        // Rewrite #EXT-X-KEY URI
+        if (trimmed.startsWith("#EXT-X-KEY")) {
+          return trimmed.replace(/URI="([^"]+)"/, (_: string, uri: string) => {
+            const proxyBase = `/key/${publicId}`;
+            const signed = buildSignedProxyUrl(proxyBase, sid, `/key`, 3600);
+            return `URI="${signed}"`;
+          });
+        }
+
+        // Skip comment lines, empty lines, and already-absolute URLs
+        if (!trimmed || trimmed.startsWith("#") || /^https?:\/\//.test(trimmed)) return line;
+
+        // Determine if this line is a segment (.ts) or a sub-playlist (.m3u8)
+        const isSegment = /\.ts(\?|$)/i.test(trimmed) || /\.m4s(\?|$)/i.test(trimmed);
+        const isVariant = /\.m3u8(\?|$)/i.test(trimmed);
+
+        if (isSegment) {
+          // Resolve full sub-path: e.g. "/720p/seg0.ts"
+          const segSubPath = path.posix.join(variantDir, trimmed);
+          const proxyBase = `/seg/${publicId}${segSubPath}`;
+          // Short TTL for segments — 15 seconds
+          return buildSignedProxyUrl(proxyBase, sid, segSubPath, 15);
+        }
+
+        if (isVariant) {
+          // Resolve full sub-path: e.g. "/720p/prog_index.m3u8"
+          const variantSubPath = path.posix.join(variantDir, trimmed);
+          const proxyBase = `/hls/${publicId}${variantSubPath}`;
+          // Variant playlists — 30 seconds
+          return buildSignedProxyUrl(proxyBase, sid, variantSubPath, 30);
+        }
+
+        return line;
+      }).join("\n");
+
+      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.send(rewritten);
+    } catch (e: any) {
+      log(`HLS proxy error for ${req.params.publicId}${req.path}: ${e.message}`);
+      res.status(500).json({ message: "Proxy error" });
+    }
+  });
+
+  // ── Secure Segment Proxy ──────────────────────────────────────────────────────
+  // Fetches segment bytes from private B2/S3 and streams to the player.
+  // Every segment URL includes a short-lived HMAC token.
+  app.use("/seg/:publicId", async (req: any, res: any, next: any) => {
+    const { sid, st, exp } = req.query as Record<string, string>;
+    const segSubPath = req.path as string; // e.g. "/720p/seg0.ts"
+
+    if (!sid || !st || !exp) return res.status(401).json({ code: "PLAYBACK_DENIED", message: "Missing auth params" });
+
+    const session = getSession(sid);
+    if (!session || session.revoked) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Session expired or revoked" });
+    }
+    if (session.publicId !== req.params.publicId) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Session mismatch" });
+    }
+
+    if (!verifySignedPath(sid, segSubPath, parseInt(exp, 10), st)) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Invalid or expired segment token" });
+    }
+
+    const { abused } = trackRequest(sid);
+    if (abused) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Video playback denied due to suspicious activity" });
+    }
+
+    try {
+      const { hlsPrefix, storageProvider, storageConfig } = session;
+      const fileKey = hlsPrefix + segSubPath.replace(/^\//, "");
+
+      let originUrl: string;
+      if (storageProvider === "backblaze_b2") {
+        originUrl = await b2PresignGetObject(storageConfig.bucket, fileKey, storageConfig.endpoint, 20);
+      } else {
+        const client = await getS3Client();
+        const s3cfg = await getS3Config();
+        if (!client || !s3cfg.bucket) return res.status(500).json({ message: "Storage not configured" });
+        const cmd = new GetObjectCommand({ Bucket: s3cfg.bucket, Key: fileKey });
+        originUrl = await getSignedUrl(client, cmd, { expiresIn: 20 });
+      }
+
+      const fetchRes = await fetch(originUrl);
+      if (!fetchRes.ok) return res.status(404).json({ message: "Segment not found" });
+
+      const contentType = segSubPath.endsWith(".m4s") ? "video/iso.segment" : "video/MP2T";
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+
+      // Stream segment bytes directly
+      const body = fetchRes.body;
+      if (body) {
+        const { Readable } = await import("stream");
+        const nodeStream = Readable.fromWeb(body as any);
+        nodeStream.pipe(res);
+        nodeStream.on("error", () => res.end());
+      } else {
+        const buf = await fetchRes.arrayBuffer();
+        res.end(Buffer.from(buf));
+      }
+    } catch (e: any) {
+      log(`Segment proxy error for ${req.params.publicId}${req.path}: ${e.message}`);
+      res.status(500).json({ message: "Segment error" });
+    }
+  });
+
+  // ── AES-128 Key Endpoint (future: when ffmpeg encryption is enabled) ──────────
+  app.get("/key/:publicId", async (req: any, res: any) => {
+    const { sid, st, exp } = req.query as Record<string, string>;
+    if (!sid || !st || !exp) return res.status(401).json({ code: "PLAYBACK_DENIED", message: "Missing auth" });
+
+    const session = getSession(sid);
+    if (!session || session.revoked) return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Session revoked" });
+    if (!verifySignedPath(sid, "/key", parseInt(exp, 10), st)) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Invalid key token" });
+    }
+
+    const { abused } = trackRequest(sid);
+    if (abused) return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Denied" });
+
+    // When AES-128 encryption is enabled in ffmpeg, serve the key from secure store here.
+    // For now, return 204 to indicate not-yet-supported without breaking clients.
+    res.status(204).end();
+  });
+
+  // ── Create Video Playback Session (alternative entry for custom players) ─────
+  app.post("/api/video/session", async (req, res) => {
+    try {
+      const { publicId, token } = req.body;
+      if (!publicId) return res.status(400).json({ message: "publicId required" });
+
+      const video = await storage.getVideoByPublicId(publicId);
+      if (!video || !video.available) return res.status(404).json({ message: "Video not found" });
+      if (video.status !== "ready") return res.status(400).json({ message: "Video not ready" });
+
+      // Validate token (same logic as manifest)
+      const secSettings = await storage.getSecuritySettings(video.id);
+      if (secSettings?.tokenRequired !== false && token) {
+        const dbToken = await storage.getTokenByValue(token);
+        if (!dbToken) {
+          const decoded = verifyToken(token);
+          if (!decoded || decoded.publicId !== video.publicId) {
+            return res.status(401).json({ message: "Invalid token" });
+          }
+        } else {
+          if (dbToken.revoked || (dbToken.expiresAt && new Date(dbToken.expiresAt) < new Date())) {
+            return res.status(401).json({ message: "Token revoked or expired" });
+          }
+        }
+      }
+
+      const hlsPrefix = video.hlsS3Prefix!;
+      const connId = (video as any).storageConnectionId as string | null;
+      const conn = connId
+        ? await storage.getStorageConnectionById(connId)
+        : await storage.getActiveStorageConnection();
+
+      if (!conn?.provider) return res.status(400).json({ message: "No storage configured" });
+
+      const cfg = conn.config as any;
+      const sid = createSession(video.publicId, hlsPrefix, conn.provider as any, cfg, conn.id);
+      const proxyBase = `/hls/${video.publicId}/master.m3u8`;
+      const playlistUrl = buildSignedProxyUrl(proxyBase, sid, "/master.m3u8", 60);
+      const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+
+      res.json({ sessionId: sid, playlistUrl, expiresAt });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
   });
 
   // Player settings (public - for embed player to configure itself)

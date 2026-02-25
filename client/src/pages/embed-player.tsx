@@ -91,6 +91,16 @@ export default function EmbedPlayerPage() {
   const [videoId, setVideoId] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [tickerOffset, setTickerOffset] = useState(0);
+  const [playbackDenied, setPlaybackDenied] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
+
+  const retryPlayback = () => {
+    setPlaybackDenied(false);
+    hlsRef.current?.destroy();
+    hlsRef.current = null;
+    setStatus("loading");
+    setRetryKey(k => k + 1);
+  };
 
   // Initialize player
   useEffect(() => {
@@ -163,7 +173,18 @@ export default function EmbedPlayerPage() {
             if (playerSettings.autoplayAllowed) video.play().catch(() => {});
           });
           hls.on(Hls.Events.ERROR, (_, d) => {
-            if (d.fatal) { setStatus("error"); setErrorMsg("Stream error"); }
+            if (d.fatal) {
+              const code = (d as any).response?.code;
+              if (code === 403 || code === 401) {
+                // Session revoked or expired — show PLAYBACK_DENIED overlay
+                hls.stopLoad();
+                videoRef.current?.pause();
+                setPlaybackDenied(true);
+              } else {
+                setStatus("error");
+                setErrorMsg("Stream error");
+              }
+            }
           });
         } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
           video.src = manifestUrl;
@@ -185,7 +206,7 @@ export default function EmbedPlayerPage() {
       if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       if (popIntervalRef.current) clearInterval(popIntervalRef.current);
     };
-  }, [publicId, token]);
+  }, [publicId, token, retryKey]);
 
   // Ping interval
   useEffect(() => {
@@ -373,6 +394,28 @@ export default function EmbedPlayerPage() {
           {status === "loading" && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/80">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-white border-t-transparent" />
+            </div>
+          )}
+
+          {/* Playback Denied overlay */}
+          {playbackDenied && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/85 z-50" data-testid="overlay-playback-denied">
+              <div className="text-center space-y-4 px-6 max-w-sm">
+                <div className="text-5xl select-none">🛡️</div>
+                <p className="text-white text-base font-semibold leading-snug">
+                  Video playback denied due to suspicious activity.
+                </p>
+                <p className="text-white/60 text-sm">
+                  Too many requests were detected. Please wait a moment and try again.
+                </p>
+                <button
+                  onClick={e => { e.stopPropagation(); retryPlayback(); }}
+                  className="mt-2 px-5 py-2 rounded-md bg-white text-black text-sm font-medium hover:bg-white/90 transition-colors"
+                  data-testid="button-retry-playback"
+                >
+                  Retry
+                </button>
+              </div>
             </div>
           )}
 
