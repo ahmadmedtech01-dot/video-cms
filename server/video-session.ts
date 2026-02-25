@@ -16,7 +16,7 @@ const ABUSE_THRESHOLDS = {
   requestWindowMs: 5000,
   concurrentSegments: 3,
   playlistFetchesPerMin: 30,
-  keyHitsPerMin: 8,
+  keyHitsPerMin: 60,
   scoreToRevoke: 10,
   windowSize: 6,
   outOfWindowPenalty: 3,
