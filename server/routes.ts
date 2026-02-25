@@ -12,6 +12,7 @@ import { storage } from "./storage";
 import { spawn } from "child_process";
 import os from "os";
 import { vimeoFetchVideo, vimeoExtractFileLinks, vimeoDiagnoseNoFileAccess } from "./vimeo";
+import { makeB2Client, b2PresignGetObject, b2UploadFile } from "./b2";
 
 function log(message: string) {
   const t = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true });
@@ -52,6 +53,38 @@ async function getS3Config() {
   };
 }
 
+// Returns the active storage connection or null (falls back to legacy S3 settings)
+async function getActiveStorageConn() {
+  return storage.getActiveStorageConnection();
+}
+
+// Generate a signed URL for HLS playback — supports B2 and AWS S3
+async function generateSignedUrl(key: string, ttlSeconds = 120, connId?: string | null): Promise<string> {
+  // Try active storage connection first
+  const conn = connId
+    ? await storage.getStorageConnectionById(connId)
+    : await storage.getActiveStorageConnection();
+  if (conn?.provider === "backblaze_b2") {
+    const cfg = conn.config as any;
+    return b2PresignGetObject(cfg.bucket, key, cfg.endpoint, ttlSeconds);
+  }
+  // Fall back to legacy AWS S3 settings
+  return generateSignedS3Url(key, ttlSeconds);
+}
+
+// Upload a local file to active storage (B2 or S3)
+async function uploadToActiveStorage(localPath: string, key: string, contentType: string, conn?: Awaited<ReturnType<typeof storage.getActiveStorageConnection>>): Promise<void> {
+  const active = conn ?? await storage.getActiveStorageConnection();
+  if (active?.provider === "backblaze_b2") {
+    const cfg = active.config as any;
+    const data = require("fs").readFileSync(localPath);
+    await b2UploadFile(cfg.bucket, key, data, contentType, cfg.endpoint);
+    return;
+  }
+  // Fall back to legacy S3
+  await uploadToS3(localPath, key, contentType);
+}
+
 // ── Ingest helpers ─────────────────────────────────────────
 
 async function downloadToTempFile(url: string, headers: Record<string, string> = {}): Promise<string> {
@@ -66,21 +99,54 @@ async function downloadToTempFile(url: string, headers: Record<string, string> =
   return tmpPath;
 }
 
+async function uploadHlsDir(localDir: string, prefix: string, activeConn: Awaited<ReturnType<typeof storage.getActiveStorageConnection>>): Promise<void> {
+  function walkDir(dir: string): string[] {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const files: string[] = [];
+    for (const e of entries) {
+      if (e.isDirectory()) files.push(...walkDir(path.join(dir, e.name)));
+      else files.push(path.join(dir, e.name));
+    }
+    return files;
+  }
+  const files = walkDir(localDir);
+  for (const file of files) {
+    const relPath = path.relative(localDir, file).replace(/\\/g, "/");
+    const key = `${prefix}${relPath}`;
+    const contentType = file.endsWith(".m3u8") ? "application/vnd.apple.mpegurl" : "video/MP2T";
+    await uploadToActiveStorage(file, key, contentType, activeConn);
+  }
+}
+
 async function transcodeAndStoreHls(videoId: string, inputPath: string, qualities: number[]): Promise<void> {
   const hlsOutputDir = path.join(os.tmpdir(), "vcms-hls", videoId);
   await runFfmpegHls(inputPath, hlsOutputDir, qualities);
+
+  // Try active storage connection (B2 or legacy S3)
+  const activeConn = await storage.getActiveStorageConnection();
+
+  if (activeConn?.provider === "backblaze_b2") {
+    const cfg = activeConn.config as any;
+    const hlsPrefix = `${cfg.hlsPrefix || "hls/"}${videoId}/`;
+    await uploadHlsDir(hlsOutputDir, hlsPrefix, activeConn);
+    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: hlsPrefix, storageConnectionId: activeConn.id, lastError: null } as any);
+    try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
+    log(`B2 HLS upload complete for video ${videoId}`);
+    return;
+  }
+
   const client = await getS3Client();
   const cfg = await getS3Config();
   if (client && cfg.bucket) {
     const hlsPrefix = `${cfg.hlsPrefix}${videoId}/`;
     await uploadHlsToS3(hlsOutputDir, hlsPrefix);
-    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: hlsPrefix, lastError: null });
+    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: hlsPrefix, lastError: null } as any);
     try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
   } else {
     const localHlsDir = path.join(uploadDir, "hls", videoId);
     if (fs.existsSync(localHlsDir)) fs.rmSync(localHlsDir, { recursive: true });
     fs.cpSync(hlsOutputDir, localHlsDir, { recursive: true });
-    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: localHlsDir, lastError: null });
+    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: localHlsDir, lastError: null } as any);
     try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
   }
   log(`Ingest/transcode complete for video ${videoId}`);
@@ -525,7 +591,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json(updated);
   });
 
-  // Upload video file → S3 → ffmpeg HLS
+  // Upload video file → storage (B2 or S3) → ffmpeg HLS
   app.post("/api/videos/:id/upload", requireAuth, upload.single("file"), async (req: any, res) => {
     const file = req.file;
     if (!file) return res.status(400).json({ message: "No file uploaded" });
@@ -535,52 +601,60 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
     try {
       await storage.updateVideo(video.id, { status: "uploading" });
-      const cfg = await getS3Config();
-      const rawKey = `${cfg.rawPrefix}${video.id}/${file.originalname}`;
-      const hlsPrefix = `${cfg.hlsPrefix}${video.id}/`;
 
-      // Try S3 upload
-      const client = await getS3Client();
-      if (client && cfg.bucket) {
-        await uploadToS3(file.path, rawKey, file.mimetype);
-        await storage.updateVideo(video.id, { rawS3Key: rawKey, status: "processing" });
+      const activeConn = await storage.getActiveStorageConnection();
+      const qualities = req.body.qualities ? JSON.parse(req.body.qualities) : [720];
+
+      if (activeConn?.provider === "backblaze_b2") {
+        const cfg = activeConn.config as any;
+        const rawKey = `${cfg.rawPrefix || "raw/"}${video.id}/${file.originalname}`;
+        await uploadToActiveStorage(file.path, rawKey, file.mimetype, activeConn);
+        await storage.updateVideo(video.id, { rawS3Key: rawKey, storageConnectionId: activeConn.id, status: "processing" } as any);
       } else {
-        // Store locally if S3 not configured
-        const localVideoDir = path.join(uploadDir, "videos", video.id);
-        if (!fs.existsSync(localVideoDir)) fs.mkdirSync(localVideoDir, { recursive: true });
-        const destPath = path.join(localVideoDir, file.originalname);
-        fs.copyFileSync(file.path, destPath);
-        await storage.updateVideo(video.id, { rawS3Key: destPath, status: "processing" });
+        // Legacy S3 or local
+        const s3cfg = await getS3Config();
+        const rawKey = `${s3cfg.rawPrefix}${video.id}/${file.originalname}`;
+        const client = await getS3Client();
+        if (client && s3cfg.bucket) {
+          await uploadToS3(file.path, rawKey, file.mimetype);
+          await storage.updateVideo(video.id, { rawS3Key: rawKey, status: "processing" });
+        } else {
+          const localVideoDir = path.join(uploadDir, "videos", video.id);
+          if (!fs.existsSync(localVideoDir)) fs.mkdirSync(localVideoDir, { recursive: true });
+          const destPath = path.join(localVideoDir, file.originalname);
+          fs.copyFileSync(file.path, destPath);
+          await storage.updateVideo(video.id, { rawS3Key: destPath, status: "processing" });
+        }
       }
 
       // ffmpeg HLS processing (async)
-      const qualities = req.body.qualities ? JSON.parse(req.body.qualities) : [720];
       const hlsOutputDir = path.join(os.tmpdir(), "vcms-hls", video.id);
-
       storage.updateVideo(video.id, { status: "processing" });
 
       (async () => {
         try {
           await runFfmpegHls(file.path, hlsOutputDir, qualities);
-          if (client && cfg.bucket) {
-            await uploadHlsToS3(hlsOutputDir, hlsPrefix);
-            await storage.updateVideo(video.id, {
-              status: "ready",
-              hlsS3Prefix: hlsPrefix,
-              qualities,
-            });
+          // transcodeAndStoreHls re-checks active connection — call upload directly
+          const conn = await storage.getActiveStorageConnection();
+          if (conn?.provider === "backblaze_b2") {
+            const cfg = conn.config as any;
+            const hlsPrefix = `${cfg.hlsPrefix || "hls/"}${video.id}/`;
+            await uploadHlsDir(hlsOutputDir, hlsPrefix, conn);
+            await storage.updateVideo(video.id, { status: "ready", hlsS3Prefix: hlsPrefix, storageConnectionId: conn.id, qualities } as any);
           } else {
-            // Store HLS locally
-            const localHlsDir = path.join(uploadDir, "hls", video.id);
-            if (fs.existsSync(localHlsDir)) fs.rmSync(localHlsDir, { recursive: true });
-            fs.cpSync(hlsOutputDir, localHlsDir, { recursive: true });
-            await storage.updateVideo(video.id, {
-              status: "ready",
-              hlsS3Prefix: localHlsDir,
-              qualities,
-            });
+            const s3cfg = await getS3Config();
+            const hlsPrefix = `${s3cfg.hlsPrefix}${video.id}/`;
+            const client = await getS3Client();
+            if (client && s3cfg.bucket) {
+              await uploadHlsToS3(hlsOutputDir, hlsPrefix);
+              await storage.updateVideo(video.id, { status: "ready", hlsS3Prefix: hlsPrefix, qualities });
+            } else {
+              const localHlsDir = path.join(uploadDir, "hls", video.id);
+              if (fs.existsSync(localHlsDir)) fs.rmSync(localHlsDir, { recursive: true });
+              fs.cpSync(hlsOutputDir, localHlsDir, { recursive: true });
+              await storage.updateVideo(video.id, { status: "ready", hlsS3Prefix: localHlsDir, qualities });
+            }
           }
-          // Cleanup
           try { fs.rmSync(file.path); } catch {}
           try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
           log(`HLS processing complete for video ${video.id}`);
@@ -781,14 +855,28 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         });
       }
 
-      // S3-based HLS
-      const client = await getS3Client();
-      const cfg = await getS3Config();
+      // Check video's storage connection (B2 or legacy S3)
       const hlsPrefix = video.hlsS3Prefix;
+      const ttl = secSettings?.signedUrlTtl || 120;
+      const connId = (video as any).storageConnectionId as string | null | undefined;
 
-      if (client && cfg.bucket) {
+      // Try connection-aware signed URL (B2 or S3)
+      const conn = connId
+        ? await storage.getStorageConnectionById(connId)
+        : await storage.getActiveStorageConnection();
+      if (conn?.provider === "backblaze_b2") {
+        const cfg = conn.config as any;
         const masterKey = `${hlsPrefix}master.m3u8`;
-        const ttl = secSettings?.signedUrlTtl || 120;
+        const signedUrl = await b2PresignGetObject(cfg.bucket, masterKey, cfg.endpoint, ttl);
+        return res.json({ manifestUrl: signedUrl, sourceType: "b2" });
+      }
+
+      // Legacy S3-based HLS
+      const client = await getS3Client();
+      const s3cfg = await getS3Config();
+
+      if (client && s3cfg.bucket) {
+        const masterKey = `${hlsPrefix}master.m3u8`;
         const signedMasterUrl = await generateSignedS3Url(masterKey, ttl);
         return res.json({ manifestUrl: signedMasterUrl, sourceType: "s3" });
       }
@@ -939,6 +1027,94 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
     } catch (e: any) {
       res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  // ── Storage Connections CRUD ───────────────────────────────
+  app.get("/api/storage-connections", requireAuth, async (_req, res) => {
+    const conns = await storage.getStorageConnections();
+    res.json(conns);
+  });
+
+  app.post("/api/storage-connections", requireAuth, async (req, res) => {
+    try {
+      const { name, provider, config } = req.body;
+      if (!name || !provider || !config) return res.status(400).json({ message: "name, provider, config required" });
+      const conn = await storage.createStorageConnection({ name, provider, config, isActive: false });
+      await storage.createAuditLog({ action: "storage_connection_created", meta: { id: conn.id, provider }, ip: req.ip });
+      res.json(conn);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.put("/api/storage-connections/:id", requireAuth, async (req, res) => {
+    try {
+      const { name, provider, config } = req.body;
+      const conn = await storage.updateStorageConnection(req.params.id, { name, provider, config });
+      res.json(conn);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.delete("/api/storage-connections/:id", requireAuth, async (req, res) => {
+    try {
+      await storage.deleteStorageConnection(req.params.id);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/storage-connections/:id/set-active", requireAuth, async (req, res) => {
+    try {
+      await storage.setActiveStorageConnection(req.params.id);
+      await storage.createAuditLog({ action: "storage_connection_set_active", meta: { id: req.params.id }, ip: req.ip });
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/storage-connections/:id/test", requireAuth, async (req, res) => {
+    try {
+      const conn = await storage.getStorageConnectionById(req.params.id);
+      if (!conn) return res.status(404).json({ ok: false, message: "Connection not found" });
+
+      if (conn.provider === "backblaze_b2") {
+        const cfg = conn.config as any;
+        const endpoint = cfg.endpoint || process.env.B2_S3_ENDPOINT || "";
+        const bucket = cfg.bucket || process.env.B2_BUCKET || "";
+        if (!endpoint) return res.status(400).json({ ok: false, message: "B2 endpoint not configured in connection" });
+        if (!bucket) return res.status(400).json({ ok: false, message: "B2 bucket not configured in connection" });
+        if (!process.env.B2_KEY_ID || !process.env.B2_APPLICATION_KEY) {
+          return res.status(400).json({ ok: false, message: "B2_KEY_ID and B2_APPLICATION_KEY must be set in Replit Secrets" });
+        }
+
+        // Upload a small test file
+        const testKey = "raw/__healthcheck.txt";
+        const client = makeB2Client({ endpoint });
+        const { PutObjectCommand, HeadObjectCommand } = await import("@aws-sdk/client-s3");
+        await client.send(new PutObjectCommand({
+          Bucket: bucket,
+          Key: testKey,
+          Body: Buffer.from("ok"),
+          ContentType: "text/plain",
+        }));
+        await client.send(new HeadObjectCommand({ Bucket: bucket, Key: testKey }));
+        return res.json({ ok: true, message: "Backblaze B2 connection working — test file written successfully." });
+      }
+
+      // AWS S3 test
+      const client = await getS3Client();
+      const cfg = await getS3Config();
+      if (!client || !cfg.bucket) return res.status(400).json({ ok: false, message: "AWS S3 credentials not configured in System Settings" });
+      const { HeadBucketCommand } = await import("@aws-sdk/client-s3");
+      await client.send(new HeadBucketCommand({ Bucket: cfg.bucket }));
+      return res.json({ ok: true, message: "AWS S3 connection working." });
+    } catch (e: any) {
+      res.status(400).json({ ok: false, message: e.message });
     }
   });
 

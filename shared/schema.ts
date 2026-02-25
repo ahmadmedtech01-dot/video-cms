@@ -41,6 +41,7 @@ export const videos = pgTable("videos", {
   lastError: text("last_error"),
   lastErrorCode: text("last_error_code"),
   lastErrorHints: jsonb("last_error_hints").default(sql`'[]'::jsonb`),
+  storageConnectionId: uuid("storage_connection_id"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -134,6 +135,15 @@ export const systemSettings = pgTable("system_settings", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const storageConnections = pgTable("storage_connections", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  provider: text("provider").notNull(), // 'aws_s3' | 'backblaze_b2'
+  config: jsonb("config").notNull().default(sql`'{}'::jsonb`),
+  isActive: boolean("is_active").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const insertVideoSchema = createInsertSchema(videos).omit({
   id: true,
   createdAt: true,
@@ -146,6 +156,8 @@ export const insertEmbedTokenSchema = createInsertSchema(embedTokens).omit({
   token: true,
 });
 
+export const insertStorageConnectionSchema = createInsertSchema(storageConnections).omit({ id: true, createdAt: true });
+
 export type InsertUser = { email: string; passwordHash: string };
 export type AdminUser = typeof adminUsers.$inferSelect;
 export type Video = typeof videos.$inferSelect;
@@ -156,6 +168,8 @@ export type EmbedToken = typeof embedTokens.$inferSelect;
 export type PlaybackSession = typeof playbackSessions.$inferSelect;
 export type AuditLog = typeof auditLogs.$inferSelect;
 export type SystemSetting = typeof systemSettings.$inferSelect;
+export type StorageConnection = typeof storageConnections.$inferSelect;
+export type InsertStorageConnection = z.infer<typeof insertStorageConnectionSchema>;
 
 export type InsertVideo = z.infer<typeof insertVideoSchema>;
 export type InsertEmbedToken = z.infer<typeof insertEmbedTokenSchema>;

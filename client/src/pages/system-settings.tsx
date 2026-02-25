@@ -12,8 +12,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Settings, Cloud, Shield, Zap, AlertTriangle, CheckCircle, Eye, EyeOff,
-  Save, Server, Database, Key, Video, RefreshCw,
+  Save, Server, Database, Key, Video, RefreshCw, Plus, Trash2, Star, ChevronDown, ChevronUp, Copy,
 } from "lucide-react";
+import type { StorageConnection } from "@shared/schema";
 
 const AWS_REGIONS = [
   "us-east-1", "us-east-2", "us-west-1", "us-west-2",
@@ -82,6 +83,79 @@ export default function SystemSettingsPage() {
 
   const s3Configured = !!(formData.aws_access_key_id && formData.s3_bucket && formData.aws_region);
 
+  // Storage Connections state
+  const { data: storageConns = [], refetch: refetchConns } = useQuery<StorageConnection[]>({
+    queryKey: ["/api/storage-connections"],
+    queryFn: () => fetch("/api/storage-connections").then(r => r.json()),
+  });
+
+  const [showAddConn, setShowAddConn] = useState(false);
+  const [connProvider, setConnProvider] = useState<"backblaze_b2" | "aws_s3">("backblaze_b2");
+  const [connName, setConnName] = useState("Backblaze B2 - mytestvideo");
+  const [connBucket, setConnBucket] = useState("mytestvideo");
+  const [connEndpoint, setConnEndpoint] = useState("https://s3.ca-east-006.backblazeb2.com");
+  const [connRawPrefix, setConnRawPrefix] = useState("raw/");
+  const [connHlsPrefix, setConnHlsPrefix] = useState("hls/");
+  const [connTestResults, setConnTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const [connTestLoading, setConnTestLoading] = useState<Record<string, boolean>>({});
+  const [showCorsTip, setShowCorsTip] = useState(false);
+
+  const createConn = useMutation({
+    mutationFn: (data: { name: string; provider: string; config: object }) =>
+      apiRequest("POST", "/api/storage-connections", data).then(r => r.json()),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/storage-connections"] });
+      setShowAddConn(false);
+      toast({ title: "Storage connection added" });
+    },
+    onError: () => toast({ title: "Failed to add connection", variant: "destructive" }),
+  });
+
+  const deleteConn = useMutation({
+    mutationFn: (id: string) => apiRequest("DELETE", `/api/storage-connections/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/storage-connections"] }),
+    onError: () => toast({ title: "Failed to delete connection", variant: "destructive" }),
+  });
+
+  const setActiveConn = useMutation({
+    mutationFn: (id: string) => apiRequest("POST", `/api/storage-connections/${id}/set-active`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/storage-connections"] });
+      toast({ title: "Active storage connection updated" });
+    },
+    onError: () => toast({ title: "Failed to set active connection", variant: "destructive" }),
+  });
+
+  const testConn = async (id: string) => {
+    setConnTestLoading(prev => ({ ...prev, [id]: true }));
+    setConnTestResults(prev => ({ ...prev, [id]: undefined as any }));
+    try {
+      const res = await fetch(`/api/storage-connections/${id}/test`, { method: "POST" });
+      const data = await res.json();
+      setConnTestResults(prev => ({ ...prev, [id]: data }));
+    } catch (e: any) {
+      setConnTestResults(prev => ({ ...prev, [id]: { ok: false, message: e.message } }));
+    } finally {
+      setConnTestLoading(prev => ({ ...prev, [id]: false }));
+    }
+  };
+
+  const handleAddConn = () => {
+    const config = connProvider === "backblaze_b2"
+      ? { endpoint: connEndpoint, bucket: connBucket, rawPrefix: connRawPrefix, hlsPrefix: connHlsPrefix }
+      : { bucket: connBucket, rawPrefix: connRawPrefix, hlsPrefix: connHlsPrefix };
+    createConn.mutate({ name: connName, provider: connProvider, config });
+  };
+
+  const B2_CORS_EXAMPLE = JSON.stringify([{
+    corsRuleName: "cms-hls",
+    allowedOrigins: ["https://YOUR_PLAYER_DOMAIN"],
+    allowedHeaders: ["*"],
+    allowedOperations: ["b2_download_file_by_name", "b2_download_file_by_id"],
+    exposeHeaders: ["ETag", "Content-Range", "Accept-Ranges"],
+    maxAgeSeconds: 3600,
+  }], null, 2);
+
   const [vimeoHealth, setVimeoHealth] = useState<{ ok: boolean; name?: string; accountType?: string; error?: string; hint?: string; hints?: string[] } | null>(null);
   const [vimeoHealthLoading, setVimeoHealthLoading] = useState(false);
 
@@ -149,12 +223,193 @@ export default function SystemSettingsPage() {
         </CardContent>
       </Card>
 
+      {/* Storage Connections */}
+      <Card className="border border-card-border">
+        <CardHeader>
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Server className="h-4 w-4" />
+                Storage Connections
+              </CardTitle>
+              <CardDescription className="mt-1">
+                Manage cloud storage providers for raw uploads and HLS output. The active connection is used for all new video uploads.
+              </CardDescription>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => setShowAddConn(v => !v)} data-testid="button-add-storage-conn">
+              <Plus className="h-3.5 w-3.5 mr-1.5" />
+              Add
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Existing connections */}
+          {storageConns.length === 0 && !showAddConn && (
+            <p className="text-xs text-muted-foreground">No storage connections configured. Add one to enable B2 or S3 uploads.</p>
+          )}
+          {storageConns.map(conn => {
+            const cfg = conn.config as any;
+            const testResult = connTestResults[conn.id];
+            const isTesting = connTestLoading[conn.id];
+            return (
+              <div key={conn.id} className={`rounded-lg border p-4 space-y-3 ${conn.isActive ? "border-primary/40 bg-primary/5" : "border-border"}`}>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-medium text-foreground">{conn.name}</span>
+                  <Badge variant="outline" className="text-xs">
+                    {conn.provider === "backblaze_b2" ? "Backblaze B2" : "AWS S3"}
+                  </Badge>
+                  {conn.isActive && (
+                    <Badge className="text-xs bg-primary/10 text-primary border-0">
+                      <Star className="h-3 w-3 mr-1" />Active
+                    </Badge>
+                  )}
+                  <div className="ml-auto flex gap-1.5">
+                    {!conn.isActive && (
+                      <Button size="sm" variant="outline" onClick={() => setActiveConn.mutate(conn.id)} disabled={setActiveConn.isPending} data-testid={`button-set-active-${conn.id}`}>
+                        Set Active
+                      </Button>
+                    )}
+                    <Button size="sm" variant="outline" onClick={() => testConn(conn.id)} disabled={isTesting} data-testid={`button-test-conn-${conn.id}`}>
+                      <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${isTesting ? "animate-spin" : ""}`} />
+                      {isTesting ? "Testing…" : "Test"}
+                    </Button>
+                    <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => deleteConn.mutate(conn.id)} data-testid={`button-delete-conn-${conn.id}`}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                  {cfg.endpoint && <span>Endpoint: <span className="text-foreground font-mono text-[11px]">{cfg.endpoint}</span></span>}
+                  <span>Bucket: <span className="text-foreground font-medium">{cfg.bucket || "—"}</span></span>
+                  <span>Raw prefix: <code className="bg-muted px-1 rounded">{cfg.rawPrefix || "raw/"}</code></span>
+                  <span>HLS prefix: <code className="bg-muted px-1 rounded">{cfg.hlsPrefix || "hls/"}</code></span>
+                  {conn.provider === "backblaze_b2" && (
+                    <span className="col-span-2 text-muted-foreground">Credentials: B2_KEY_ID + B2_APPLICATION_KEY from server environment (never shown here)</span>
+                  )}
+                </div>
+
+                {testResult && (
+                  <div className={`rounded-md border p-2 text-xs flex items-start gap-2 ${testResult.ok ? "border-green-500/30 bg-green-500/5" : "border-destructive/30 bg-destructive/5"}`}>
+                    {testResult.ok
+                      ? <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0 mt-0.5" />
+                      : <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0 mt-0.5" />}
+                    <span className={testResult.ok ? "text-green-600 dark:text-green-400" : "text-destructive"}>{testResult.message}</span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Add connection form */}
+          {showAddConn && (
+            <div className="rounded-lg border border-dashed border-border p-4 space-y-4">
+              <p className="text-sm font-medium text-foreground">Add Storage Connection</p>
+              <div className="space-y-1.5">
+                <Label>Provider</Label>
+                <Select value={connProvider} onValueChange={(v: any) => {
+                  setConnProvider(v);
+                  if (v === "backblaze_b2") {
+                    setConnName("Backblaze B2 - mytestvideo");
+                    setConnBucket("mytestvideo");
+                    setConnEndpoint("https://s3.ca-east-006.backblazeb2.com");
+                  } else {
+                    setConnName("AWS S3 - my-bucket");
+                    setConnEndpoint("");
+                  }
+                }}>
+                  <SelectTrigger data-testid="select-conn-provider">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="backblaze_b2">Backblaze B2 (S3 Compatible)</SelectItem>
+                    <SelectItem value="aws_s3">AWS S3</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Connection Name</Label>
+                <Input value={connName} onChange={e => setConnName(e.target.value)} data-testid="input-conn-name" />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label>Bucket Name</Label>
+                  <Input value={connBucket} onChange={e => setConnBucket(e.target.value)} placeholder="mytestvideo" data-testid="input-conn-bucket" />
+                </div>
+                {connProvider === "backblaze_b2" && (
+                  <div className="space-y-1.5">
+                    <Label>S3 Endpoint</Label>
+                    <Input value={connEndpoint} onChange={e => setConnEndpoint(e.target.value)} placeholder="https://s3.ca-east-006.backblazeb2.com" data-testid="input-conn-endpoint" />
+                  </div>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label>Raw Prefix</Label>
+                  <Input value={connRawPrefix} onChange={e => setConnRawPrefix(e.target.value)} placeholder="raw/" data-testid="input-conn-raw-prefix" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>HLS Prefix</Label>
+                  <Input value={connHlsPrefix} onChange={e => setConnHlsPrefix(e.target.value)} placeholder="hls/" data-testid="input-conn-hls-prefix" />
+                </div>
+              </div>
+              {connProvider === "backblaze_b2" && (
+                <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+                  <Key className="h-4 w-4 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium text-foreground mb-0.5">B2 credentials are stored in server secrets (never in UI)</p>
+                    <p>Set <code className="bg-background px-1 rounded">B2_KEY_ID</code> and <code className="bg-background px-1 rounded">B2_APPLICATION_KEY</code> in Replit Secrets. The Access Key ID is: <code className="bg-background px-1 rounded">a54c2d711411</code> (display only).</p>
+                  </div>
+                </div>
+              )}
+              <div className="flex gap-2">
+                <Button size="sm" onClick={handleAddConn} disabled={createConn.isPending} data-testid="button-save-conn">
+                  <Save className="h-3.5 w-3.5 mr-1.5" />
+                  {createConn.isPending ? "Saving…" : "Save Connection"}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setShowAddConn(false)}>Cancel</Button>
+              </div>
+            </div>
+          )}
+
+          {/* B2 CORS guidance */}
+          {storageConns.some(c => c.provider === "backblaze_b2") && (
+            <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
+              <button
+                className="flex items-center gap-2 text-xs font-medium text-foreground w-full text-left"
+                onClick={() => setShowCorsTip(v => !v)}
+              >
+                {showCorsTip ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                B2 CORS Configuration (required for browser HLS playback)
+              </button>
+              {showCorsTip && (
+                <div className="text-xs text-muted-foreground space-y-2">
+                  <p>If serving HLS signed URLs directly from B2 to the browser, add these CORS rules to your B2 bucket via the Backblaze dashboard or API. Replace <code className="bg-background px-1 rounded">YOUR_PLAYER_DOMAIN</code> with your actual domain.</p>
+                  <div className="relative">
+                    <pre className="bg-background border border-border rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">{B2_CORS_EXAMPLE}</pre>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="absolute top-2 right-2 h-6 px-2 text-xs"
+                      onClick={() => { navigator.clipboard.writeText(B2_CORS_EXAMPLE); toast({ title: "CORS JSON copied" }); }}
+                    >
+                      <Copy className="h-3 w-3 mr-1" />Copy
+                    </Button>
+                  </div>
+                  <p className="text-muted-foreground">Go to Backblaze → Buckets → your bucket → CORS Rules → Edit, and paste the JSON above.</p>
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* AWS / S3 Configuration */}
       <Card className="border border-card-border">
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
             <Cloud className="h-4 w-4" />
-            AWS / S3 Storage
+            AWS / S3 Storage (Legacy)
             {s3Configured
               ? <Badge className="ml-auto bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-0"><CheckCircle className="h-3 w-3 mr-1" />Configured</Badge>
               : <Badge variant="outline" className="ml-auto text-muted-foreground">Not Configured</Badge>

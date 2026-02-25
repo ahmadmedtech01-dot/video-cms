@@ -1,10 +1,10 @@
 import { db } from "./db";
 import {
   adminUsers, videos, videoPlayerSettings, videoWatermarkSettings,
-  videoSecuritySettings, embedTokens, playbackSessions, auditLogs, systemSettings,
+  videoSecuritySettings, embedTokens, playbackSessions, auditLogs, systemSettings, storageConnections,
   type AdminUser, type Video, type VideoPlayerSettings, type VideoWatermarkSettings,
   type VideoSecuritySettings, type EmbedToken, type PlaybackSession, type AuditLog,
-  type SystemSetting,
+  type SystemSetting, type StorageConnection,
 } from "@shared/schema";
 import { eq, desc, and, sql } from "drizzle-orm";
 
@@ -190,5 +190,39 @@ export const storage = {
     for (const [key, value] of Object.entries(data)) {
       await this.setSetting(key, value);
     }
+  },
+
+  // Storage Connections
+  async getStorageConnections(): Promise<StorageConnection[]> {
+    return db.select().from(storageConnections).orderBy(desc(storageConnections.createdAt));
+  },
+
+  async getStorageConnectionById(id: string): Promise<StorageConnection | undefined> {
+    const [c] = await db.select().from(storageConnections).where(eq(storageConnections.id, id));
+    return c;
+  },
+
+  async getActiveStorageConnection(): Promise<StorageConnection | undefined> {
+    const [c] = await db.select().from(storageConnections).where(eq(storageConnections.isActive, true));
+    return c;
+  },
+
+  async createStorageConnection(data: Omit<StorageConnection, "id" | "createdAt">): Promise<StorageConnection> {
+    const [c] = await db.insert(storageConnections).values(data as any).returning();
+    return c;
+  },
+
+  async updateStorageConnection(id: string, data: Partial<StorageConnection>): Promise<StorageConnection | undefined> {
+    const [c] = await db.update(storageConnections).set(data as any).where(eq(storageConnections.id, id)).returning();
+    return c;
+  },
+
+  async deleteStorageConnection(id: string): Promise<void> {
+    await db.delete(storageConnections).where(eq(storageConnections.id, id));
+  },
+
+  async setActiveStorageConnection(id: string): Promise<void> {
+    await db.update(storageConnections).set({ isActive: false });
+    await db.update(storageConnections).set({ isActive: true }).where(eq(storageConnections.id, id));
   },
 };
