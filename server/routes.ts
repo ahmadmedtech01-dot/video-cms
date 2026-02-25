@@ -1183,7 +1183,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const { sessionCode, secondsWatched } = req.body;
       if (sessionCode) {
-        await storage.pingSession(sessionCode, secondsWatched || 0);
+        await storage.pingSession(sessionCode, Math.round(secondsWatched || 0));
       } else {
         // Create new session
         const video = await storage.getVideoByPublicId(req.params.publicId);

@@ -69,6 +69,9 @@ export default function EmbedPlayerPage() {
   const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const popIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const controlsTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const devToolsCheckRef = useRef<NodeJS.Timeout | null>(null);
+  const devToolsOpenRef = useRef(false);
+  const denialSignalRef = useRef("");
 
   const [status, setStatus] = useState<"loading" | "ready" | "error" | "unavailable" | "processing">("loading");
   const [errorMsg, setErrorMsg] = useState("");
@@ -95,9 +98,19 @@ export default function EmbedPlayerPage() {
   const [denialSignal, setDenialSignal] = useState<string>("");
   const [retryKey, setRetryKey] = useState(0);
 
+  // Keep ref in sync so DevTools detector can read current signal without stale closure
+  useEffect(() => { denialSignalRef.current = denialSignal; }, [denialSignal]);
+
+  const triggerDenial = (signal: string) => {
+    denialSignalRef.current = signal;
+    setDenialSignal(signal);
+    setPlaybackDenied(true);
+  };
+
   const retryPlayback = () => {
     setPlaybackDenied(false);
     setDenialSignal("");
+    denialSignalRef.current = "";
     hlsRef.current?.destroy();
     hlsRef.current = null;
     setStatus("loading");
@@ -181,12 +194,12 @@ export default function EmbedPlayerPage() {
               if (code === 403 || code === 401) {
                 hls.stopLoad();
                 videoRef.current?.pause();
-                // Try to extract the abuse signal from the response body
+                let signal = "rate_limit";
                 try {
                   const parsed = JSON.parse(responseText);
-                  if (parsed?.signal) setDenialSignal(parsed.signal);
+                  if (parsed?.signal) signal = parsed.signal;
                 } catch {}
-                setPlaybackDenied(true);
+                triggerDenial(signal);
               } else {
                 setStatus("error");
                 setErrorMsg("Stream error");
@@ -227,6 +240,75 @@ export default function EmbedPlayerPage() {
     }, 30000);
     return () => { if (pingIntervalRef.current) clearInterval(pingIntervalRef.current); };
   }, [sessionCode, secondsWatched, publicId]);
+
+  // DevTools detection — pauses playback when browser DevTools is open
+  useEffect(() => {
+    if (status !== "ready" && status !== "loading") return;
+
+    // Threshold above normal browser chrome (address bar, etc. add ~50–80px)
+    const WIDTH_THRESHOLD = 160;
+    const HEIGHT_THRESHOLD = 200;
+
+    // Secondary console-getter trick: V8 calls object getters when DevTools
+    // console is actively rendering logged objects. We fire this silently by
+    // passing a detached Image with a spoofed 'src' getter.
+    const makeConsoleProbe = () => {
+      let triggered = false;
+      const img = new Image();
+      Object.defineProperty(img, "src", {
+        get() { triggered = true; return ""; },
+      });
+      // console.debug is less visible than console.log but still triggers the getter
+      // when the DevTools console panel is open and rendering
+      console.debug(img);
+      return triggered;
+    };
+
+    const detect = () => {
+      const wDiff = (window.outerWidth || 0) - (window.innerWidth || 0);
+      const hDiff = (window.outerHeight || 0) - (window.innerHeight || 0);
+      const sizeDetected = wDiff > WIDTH_THRESHOLD || hDiff > HEIGHT_THRESHOLD;
+      const consoleDetected = makeConsoleProbe();
+      return sizeDetected || consoleDetected;
+    };
+
+    const handleDetection = (open: boolean) => {
+      if (open && !devToolsOpenRef.current) {
+        devToolsOpenRef.current = true;
+        hlsRef.current?.stopLoad();
+        videoRef.current?.pause();
+        triggerDenial("devtools");
+      } else if (!open && devToolsOpenRef.current) {
+        devToolsOpenRef.current = false;
+        // Auto-resume only if DevTools was the sole cause (not a server-side ban)
+        if (denialSignalRef.current === "devtools") {
+          // Full player restart so fresh session & segment tokens are issued
+          setPlaybackDenied(false);
+          setDenialSignal("");
+          denialSignalRef.current = "";
+          hlsRef.current?.destroy();
+          hlsRef.current = null;
+          setStatus("loading");
+          setRetryKey(k => k + 1);
+        }
+      }
+    };
+
+    // Poll every 500 ms
+    devToolsCheckRef.current = setInterval(() => {
+      handleDetection(detect());
+    }, 500);
+
+    // Also react immediately on window resize (docked/undocked DevTools)
+    const onResize = () => handleDetection(detect());
+    window.addEventListener("resize", onResize);
+
+    return () => {
+      if (devToolsCheckRef.current) clearInterval(devToolsCheckRef.current);
+      window.removeEventListener("resize", onResize);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
 
   // Ticker animation
   useEffect(() => {
@@ -413,7 +495,9 @@ export default function EmbedPlayerPage() {
                   Video playback denied due to suspicious activity.
                 </p>
                 <p className="text-white/60 text-sm">
-                  {denialSignal === "concurrent"
+                  {denialSignal === "devtools"
+                    ? "Browser developer tools are open. Close DevTools to resume."
+                    : denialSignal === "concurrent"
                     ? "Too many simultaneous connections were detected."
                     : denialSignal === "playlist_abuse"
                     ? "Excessive playlist requests were detected."
@@ -423,13 +507,15 @@ export default function EmbedPlayerPage() {
                     ? "Session used from multiple locations simultaneously."
                     : "Too many requests were detected. Please wait a moment and try again."}
                 </p>
-                <button
-                  onClick={e => { e.stopPropagation(); retryPlayback(); }}
-                  className="mt-2 px-5 py-2 rounded-md bg-white text-black text-sm font-medium hover:bg-white/90 transition-colors"
-                  data-testid="button-retry-playback"
-                >
-                  Retry
-                </button>
+                {denialSignal !== "devtools" && (
+                  <button
+                    onClick={e => { e.stopPropagation(); retryPlayback(); }}
+                    className="mt-2 px-5 py-2 rounded-md bg-white text-black text-sm font-medium hover:bg-white/90 transition-colors"
+                    data-testid="button-retry-playback"
+                  >
+                    Retry
+                  </button>
+                )}
               </div>
             </div>
           )}
