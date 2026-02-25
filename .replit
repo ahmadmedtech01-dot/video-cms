@@ -37,3 +37,9 @@ author = "agent"
 task = "shell.exec"
 args = "npm run dev"
 waitForPort = 5000
+
+[userenv]
+
+[userenv.shared]
+ADMIN_EMAIL = "syanmedtechadmen@gmail.com"
+ADMIN_PASSWORD = "Pak@1234"

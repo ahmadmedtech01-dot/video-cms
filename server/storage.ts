@@ -1,38 +1,194 @@
-import { type User, type InsertUser } from "@shared/schema";
-import { randomUUID } from "crypto";
+import { db } from "./db";
+import {
+  adminUsers, videos, videoPlayerSettings, videoWatermarkSettings,
+  videoSecuritySettings, embedTokens, playbackSessions, auditLogs, systemSettings,
+  type AdminUser, type Video, type VideoPlayerSettings, type VideoWatermarkSettings,
+  type VideoSecuritySettings, type EmbedToken, type PlaybackSession, type AuditLog,
+  type SystemSetting,
+} from "@shared/schema";
+import { eq, desc, and, sql } from "drizzle-orm";
 
-// modify the interface with any CRUD methods
-// you might need
+export const storage = {
+  // Admin
+  async getAdminByEmail(email: string): Promise<AdminUser | undefined> {
+    const [admin] = await db.select().from(adminUsers).where(eq(adminUsers.email, email));
+    return admin;
+  },
 
-export interface IStorage {
-  getUser(id: string): Promise<User | undefined>;
-  getUserByUsername(username: string): Promise<User | undefined>;
-  createUser(user: InsertUser): Promise<User>;
-}
+  // Videos
+  async getVideos(): Promise<Video[]> {
+    return db.select().from(videos).orderBy(desc(videos.createdAt));
+  },
 
-export class MemStorage implements IStorage {
-  private users: Map<string, User>;
+  async getVideoById(id: string): Promise<Video | undefined> {
+    const [v] = await db.select().from(videos).where(eq(videos.id, id));
+    return v;
+  },
 
-  constructor() {
-    this.users = new Map();
-  }
+  async getVideoByPublicId(publicId: string): Promise<Video | undefined> {
+    const [v] = await db.select().from(videos).where(eq(videos.publicId, publicId));
+    return v;
+  },
 
-  async getUser(id: string): Promise<User | undefined> {
-    return this.users.get(id);
-  }
+  async createVideo(data: Partial<Video>): Promise<Video> {
+    const [v] = await db.insert(videos).values(data as any).returning();
+    return v;
+  },
 
-  async getUserByUsername(username: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find(
-      (user) => user.username === username,
-    );
-  }
+  async updateVideo(id: string, data: Partial<Video>): Promise<Video | undefined> {
+    const [v] = await db
+      .update(videos)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(videos.id, id))
+      .returning();
+    return v;
+  },
 
-  async createUser(insertUser: InsertUser): Promise<User> {
-    const id = randomUUID();
-    const user: User = { ...insertUser, id };
-    this.users.set(id, user);
-    return user;
-  }
-}
+  async deleteVideo(id: string): Promise<void> {
+    await db.delete(videos).where(eq(videos.id, id));
+  },
 
-export const storage = new MemStorage();
+  // Player Settings
+  async getPlayerSettings(videoId: string): Promise<VideoPlayerSettings | undefined> {
+    const [s] = await db.select().from(videoPlayerSettings).where(eq(videoPlayerSettings.videoId, videoId));
+    return s;
+  },
+
+  async upsertPlayerSettings(videoId: string, data: Partial<VideoPlayerSettings>): Promise<VideoPlayerSettings> {
+    const existing = await this.getPlayerSettings(videoId);
+    if (existing) {
+      const [s] = await db.update(videoPlayerSettings).set(data).where(eq(videoPlayerSettings.videoId, videoId)).returning();
+      return s;
+    } else {
+      const [s] = await db.insert(videoPlayerSettings).values({ videoId, ...data } as any).returning();
+      return s;
+    }
+  },
+
+  // Watermark Settings
+  async getWatermarkSettings(videoId: string): Promise<VideoWatermarkSettings | undefined> {
+    const [s] = await db.select().from(videoWatermarkSettings).where(eq(videoWatermarkSettings.videoId, videoId));
+    return s;
+  },
+
+  async upsertWatermarkSettings(videoId: string, data: Partial<VideoWatermarkSettings>): Promise<VideoWatermarkSettings> {
+    const existing = await this.getWatermarkSettings(videoId);
+    if (existing) {
+      const [s] = await db.update(videoWatermarkSettings).set(data).where(eq(videoWatermarkSettings.videoId, videoId)).returning();
+      return s;
+    } else {
+      const [s] = await db.insert(videoWatermarkSettings).values({ videoId, ...data } as any).returning();
+      return s;
+    }
+  },
+
+  // Security Settings
+  async getSecuritySettings(videoId: string): Promise<VideoSecuritySettings | undefined> {
+    const [s] = await db.select().from(videoSecuritySettings).where(eq(videoSecuritySettings.videoId, videoId));
+    return s;
+  },
+
+  async upsertSecuritySettings(videoId: string, data: Partial<VideoSecuritySettings>): Promise<VideoSecuritySettings> {
+    const existing = await this.getSecuritySettings(videoId);
+    if (existing) {
+      const [s] = await db.update(videoSecuritySettings).set(data).where(eq(videoSecuritySettings.videoId, videoId)).returning();
+      return s;
+    } else {
+      const [s] = await db.insert(videoSecuritySettings).values({ videoId, ...data } as any).returning();
+      return s;
+    }
+  },
+
+  // Embed Tokens
+  async createEmbedToken(data: Partial<EmbedToken>): Promise<EmbedToken> {
+    const [t] = await db.insert(embedTokens).values(data as any).returning();
+    return t;
+  },
+
+  async getEmbedTokensByVideo(videoId: string): Promise<EmbedToken[]> {
+    return db.select().from(embedTokens).where(eq(embedTokens.videoId, videoId)).orderBy(desc(embedTokens.createdAt));
+  },
+
+  async getAllTokens(): Promise<EmbedToken[]> {
+    return db.select().from(embedTokens).orderBy(desc(embedTokens.createdAt));
+  },
+
+  async getTokenByValue(token: string): Promise<EmbedToken | undefined> {
+    const [t] = await db.select().from(embedTokens).where(eq(embedTokens.token, token));
+    return t;
+  },
+
+  async revokeToken(id: string): Promise<void> {
+    await db.update(embedTokens).set({ revoked: true }).where(eq(embedTokens.id, id));
+  },
+
+  async deleteToken(id: string): Promise<void> {
+    await db.delete(embedTokens).where(eq(embedTokens.id, id));
+  },
+
+  // Playback Sessions
+  async createSession(data: Partial<PlaybackSession>): Promise<PlaybackSession> {
+    const [s] = await db.insert(playbackSessions).values(data as any).returning();
+    return s;
+  },
+
+  async pingSession(sessionCode: string, secondsWatched: number): Promise<void> {
+    await db.update(playbackSessions)
+      .set({ lastSeenAt: new Date(), secondsWatched })
+      .where(eq(playbackSessions.sessionCode, sessionCode));
+  },
+
+  async getSessionsByVideo(videoId: string): Promise<PlaybackSession[]> {
+    return db.select().from(playbackSessions)
+      .where(eq(playbackSessions.videoId, videoId))
+      .orderBy(desc(playbackSessions.startedAt))
+      .limit(50);
+  },
+
+  async getVideoAnalytics(videoId: string) {
+    const sessions = await this.getSessionsByVideo(videoId);
+    const totalPlays = sessions.length;
+    const totalWatchSeconds = sessions.reduce((a, s) => a + (s.secondsWatched || 0), 0);
+    const uniqueDomains = [...new Set(sessions.map(s => s.domain).filter(Boolean))];
+    const domainCounts: Record<string, number> = {};
+    sessions.forEach(s => {
+      if (s.domain) domainCounts[s.domain] = (domainCounts[s.domain] || 0) + 1;
+    });
+    const topDomains = Object.entries(domainCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    return { totalPlays, totalWatchSeconds, uniqueDomains: uniqueDomains.length, topDomains, recentSessions: sessions.slice(0, 20) };
+  },
+
+  // Audit Logs
+  async createAuditLog(data: { action: string; meta?: any; ip?: string }): Promise<void> {
+    await db.insert(auditLogs).values(data as any);
+  },
+
+  async getAuditLogs(): Promise<AuditLog[]> {
+    return db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(100);
+  },
+
+  // System Settings
+  async getSetting(key: string): Promise<string | null> {
+    const [s] = await db.select().from(systemSettings).where(eq(systemSettings.key, key));
+    return s?.value ?? null;
+  },
+
+  async getAllSettings(): Promise<SystemSetting[]> {
+    return db.select().from(systemSettings);
+  },
+
+  async setSetting(key: string, value: string): Promise<void> {
+    const existing = await db.select().from(systemSettings).where(eq(systemSettings.key, key));
+    if (existing.length > 0) {
+      await db.update(systemSettings).set({ value, updatedAt: new Date() }).where(eq(systemSettings.key, key));
+    } else {
+      await db.insert(systemSettings).values({ key, value });
+    }
+  },
+
+  async setSettings(data: Record<string, string>): Promise<void> {
+    for (const [key, value] of Object.entries(data)) {
+      await this.setSetting(key, value);
+    }
+  },
+};
