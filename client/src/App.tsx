@@ -1,4 +1,4 @@
-import { Switch, Route, useLocation, Redirect } from "wouter";
+import { Switch, Route, Redirect, useLocation } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -35,23 +35,7 @@ function ThemeToggle() {
   );
 }
 
-function ProtectedLayout({ children }: { children: React.ReactNode }) {
-  const { user, isLoading } = useAuth();
-  const [location] = useLocation();
-
-  if (isLoading) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-          <p className="text-sm text-muted-foreground">Loading...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!user) return <Redirect to="/login" />;
-
+function AdminLayout({ children }: { children: React.ReactNode }) {
   return (
     <SidebarProvider style={{ "--sidebar-width": "15rem", "--sidebar-width-icon": "3.5rem" } as React.CSSProperties}>
       <div className="flex h-screen w-full bg-background overflow-hidden">
@@ -70,28 +54,45 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
   );
 }
 
+function ProtectedRoute({ component: Component }: { component: React.ComponentType }) {
+  const { user, isLoading } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-3">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+          <p className="text-sm text-muted-foreground">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Redirect to="/login" />;
+  }
+
+  return (
+    <AdminLayout>
+      <Component />
+    </AdminLayout>
+  );
+}
+
 function Router() {
   return (
     <Switch>
       <Route path="/login" component={LoginPage} />
       <Route path="/embed/:publicId" component={EmbedPlayerPage} />
       <Route path="/v/:publicId" component={SharePlayerPage} />
-      <Route path="/">
-        {() => (
-          <ProtectedLayout>
-            <Switch>
-              <Route path="/" component={DashboardPage} />
-              <Route path="/library" component={LibraryPage} />
-              <Route path="/upload" component={UploadPage} />
-              <Route path="/videos/:id" component={VideoDetailPage} />
-              <Route path="/embeds" component={EmbedManagerPage} />
-              <Route path="/settings" component={SystemSettingsPage} />
-              <Route path="/audit" component={AuditLogsPage} />
-              <Route component={NotFound} />
-            </Switch>
-          </ProtectedLayout>
-        )}
-      </Route>
+      <Route path="/" component={() => <ProtectedRoute component={DashboardPage} />} />
+      <Route path="/library" component={() => <ProtectedRoute component={LibraryPage} />} />
+      <Route path="/upload" component={() => <ProtectedRoute component={UploadPage} />} />
+      <Route path="/videos/:id" component={() => <ProtectedRoute component={VideoDetailPage} />} />
+      <Route path="/embeds" component={() => <ProtectedRoute component={EmbedManagerPage} />} />
+      <Route path="/settings" component={() => <ProtectedRoute component={SystemSettingsPage} />} />
+      <Route path="/audit" component={() => <ProtectedRoute component={AuditLogsPage} />} />
+      <Route component={NotFound} />
     </Switch>
   );
 }
