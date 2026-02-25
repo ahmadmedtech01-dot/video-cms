@@ -60,6 +60,9 @@ export interface VideoSession {
   lastProgressAt: number;
   outOfWindowCount: number;
   variantCache: Map<string, PlaylistCache>;
+
+  ephemeralKey: Buffer;
+  ephemeralIV: Buffer;
 }
 
 const sessions = new Map<string, VideoSession>();
@@ -104,6 +107,8 @@ export function createSession(
     lastProgressAt: Date.now(),
     outOfWindowCount: 0,
     variantCache: new Map(),
+    ephemeralKey: crypto.randomBytes(16),
+    ephemeralIV: crypto.randomBytes(16),
   });
   return sid;
 }

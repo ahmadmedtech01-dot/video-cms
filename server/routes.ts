@@ -340,6 +340,51 @@ async function runFfmpegHls(
   });
 }
 
+const masterKeyCache = new Map<string, Buffer>();
+
+async function getMasterKey(encryptionKeyPath: string, session: any): Promise<Buffer | null> {
+  if (masterKeyCache.has(encryptionKeyPath)) return masterKeyCache.get(encryptionKeyPath)!;
+  try {
+    const cfg = session.storageConfig;
+    const b2 = makeB2Client({ endpoint: cfg.endpoint });
+    const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+    const resp = await b2.send(new GetObjectCommand({ Bucket: cfg.bucket, Key: encryptionKeyPath }));
+    const keyBytes = Buffer.from(await resp.Body!.transformToByteArray());
+    masterKeyCache.set(encryptionKeyPath, keyBytes);
+    return keyBytes;
+  } catch (e: any) {
+    log(`getMasterKey error: ${e.message}`);
+    return null;
+  }
+}
+
+function decryptAes128Cbc(ciphertext: Buffer, key: Buffer, iv: Buffer): Buffer {
+  const decipher = crypto.createDecipheriv("aes-128-cbc", key, iv);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
+
+function encryptAes128Cbc(plaintext: Buffer, key: Buffer, iv: Buffer): Buffer {
+  const cipher = crypto.createCipheriv("aes-128-cbc", key, iv);
+  return Buffer.concat([cipher.update(plaintext), cipher.final()]);
+}
+
+function extractIVFromKeyTag(keyTag: string): Buffer | null {
+  const ivMatch = keyTag.match(/IV=0x([0-9a-fA-F]+)/);
+  if (!ivMatch) return null;
+  return Buffer.from(ivMatch[1], "hex");
+}
+
+function extractIVForSegment(session: any, segSubPath: string): Buffer | null {
+  for (const [, cached] of session.variantCache as Map<string, any>) {
+    for (const seg of cached.segments) {
+      if (segSubPath.includes(seg.uri) && seg.keyTag) {
+        return extractIVFromKeyTag(seg.keyTag);
+      }
+    }
+  }
+  return null;
+}
+
 function generateEncryptionKey(): { keyBytes: Buffer; keyHex: string; kid: string; iv: string } {
   const keyBytes = crypto.randomBytes(16);
   const keyHex = keyBytes.toString("hex");
@@ -1225,7 +1270,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           if (seg.keyTag && seg.keyTag !== lastKeyEmitted) {
             const proxyBase = `/key/${publicId}`;
             const signed = buildSignedProxyUrl(proxyBase, sid, `/key`, 3600, dh);
-            const rewritten = seg.keyTag.replace(/URI="([^"]+)"/, () => `URI="${signed}"`);
+            let rewritten = seg.keyTag.replace(/URI="([^"]+)"/, () => `URI="${signed}"`);
+            if (session.ephemeralIV) {
+              const ephIvHex = session.ephemeralIV.toString("hex");
+              rewritten = rewritten.replace(/IV=0x[0-9a-fA-F]+/, `IV=0x${ephIvHex}`);
+            }
             lines.push(rewritten);
             lastKeyEmitted = seg.keyTag;
           }
@@ -1315,20 +1364,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.setHeader("Cache-Control", "private, max-age=10, no-transform");
       res.setHeader("X-Content-Type-Options", "nosniff");
 
-      // Stream segment bytes and release concurrency slot when done
-      const body = fetchRes.body;
-      if (body) {
-        const { Readable } = await import("stream");
-        const nodeStream = Readable.fromWeb(body as any);
-        nodeStream.pipe(res);
-        nodeStream.on("end", () => releaseSegment(sid));
-        nodeStream.on("error", () => { releaseSegment(sid); res.end(); });
-        res.on("close", () => releaseSegment(sid));
-      } else {
-        const buf = await fetchRes.arrayBuffer();
-        releaseSegment(sid);
-        res.end(Buffer.from(buf));
+      const encryptedBuf = Buffer.from(await fetchRes.arrayBuffer());
+
+      const video = await storage.getVideoByPublicId(session.publicId);
+      if (video?.encryptionKeyPath && session.ephemeralKey) {
+        try {
+          const masterKey = await getMasterKey(video.encryptionKeyPath, session);
+          const originalIV = extractIVForSegment(session, segSubPath);
+          if (masterKey && originalIV) {
+            const decrypted = decryptAes128Cbc(encryptedBuf, masterKey, originalIV);
+            const reEncrypted = encryptAes128Cbc(decrypted, session.ephemeralKey, session.ephemeralIV);
+            releaseSegment(sid);
+            return res.end(reEncrypted);
+          }
+        } catch (e: any) {
+          log(`Re-encrypt error: ${e.message}`);
+        }
       }
+
+      releaseSegment(sid);
+      res.end(encryptedBuf);
     } catch (e: any) {
       releaseSegment(sid);
       log(`Segment proxy error for ${req.params.publicId}${req.path}: ${e.message}`);
@@ -1388,30 +1443,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (keyAbused) return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Denied", signal: keyReason?.signal });
 
     try {
-      const publicId = req.params.publicId;
-      const video = await storage.getVideoByPublicId(publicId);
-      if (!video?.encryptionKeyPath) {
-        return res.status(404).json({ code: "PLAYBACK_DENIED", message: "No encryption key" });
-      }
-
-      const connId = (video as any).storageConnectionId as string | null;
-      const conn = connId
-        ? await storage.getStorageConnectionById(connId)
-        : await storage.getActiveStorageConnection();
-
-      if (!conn) return res.status(500).json({ message: "Storage not configured" });
-
-      const cfg = conn.config as any;
-      const b2 = makeB2Client({ endpoint: cfg.endpoint });
-      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-      const resp = await b2.send(new GetObjectCommand({ Bucket: cfg.bucket, Key: video.encryptionKeyPath }));
-      const bodyBytes = await resp.Body!.transformToByteArray();
-
       res.setHeader("Content-Type", "application/octet-stream");
-      res.setHeader("Content-Length", bodyBytes.length);
+      res.setHeader("Content-Length", 16);
       res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
       res.setHeader("Access-Control-Allow-Origin", "*");
-      return res.send(Buffer.from(bodyBytes));
+      return res.send(session.ephemeralKey);
     } catch (e: any) {
       log(`Key fetch error: ${e.message}`);
       return res.status(500).json({ code: "PLAYBACK_DENIED", message: "Key fetch failed" });
