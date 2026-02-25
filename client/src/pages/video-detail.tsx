@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useParams, Link } from "wouter";
 import { useState, useEffect } from "react";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -514,7 +514,34 @@ export default function VideoDetailPage() {
                   <div className="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
                   <div>
                     <p className="text-sm font-medium text-amber-700 dark:text-amber-400">Video is being processed</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">Downloading and converting to HLS. This page will refresh automatically.</p>
+                    {(video as any).processingProgress ? (
+                      <p className="text-xs text-muted-foreground mt-0.5" data-testid="text-processing-progress">
+                        {(video as any).processingProgress.stage === "uploading"
+                          ? "Transcoding complete — uploading segments to storage..."
+                          : `Transcoding: ${(video as any).processingProgress.time || "starting..."} encoded at ${(video as any).processingProgress.speed || "0x"} speed. This page refreshes automatically.`}
+                      </p>
+                    ) : (
+                      <div className="mt-1">
+                        <p className="text-xs text-muted-foreground">Processing may be stalled. You can restart it below.</p>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="mt-2 text-amber-700 border-amber-500/50 hover:bg-amber-500/10"
+                          data-testid="button-restart-processing"
+                          onClick={async () => {
+                            try {
+                              await apiRequest("POST", `/api/videos/${video.id}/retranscode`);
+                              queryClient.invalidateQueries({ queryKey: ["/api/videos", video.id] });
+                              toast({ title: "Processing restarted" });
+                            } catch (e: any) {
+                              toast({ title: "Failed to restart", description: e.message, variant: "destructive" });
+                            }
+                          }}
+                        >
+                          Restart Processing
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 </div>
               </CardContent>

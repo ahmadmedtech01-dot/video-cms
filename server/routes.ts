@@ -134,8 +134,9 @@ async function transcodeAndStoreHls(videoId: string, inputPath: string, qualitie
   fs.writeFileSync(keyFilePath, enc.keyBytes);
   createKeyInfoFile("enc.key", keyFilePath, enc.iv, keyInfoPath);
 
-  await runFfmpegHls(inputPath, hlsOutputDir, qualities, { keyInfoPath });
+  await runFfmpegHls(inputPath, hlsOutputDir, qualities, { keyInfoPath }, videoId);
 
+  if (videoId) transcodeProgress.set(videoId, { time: "", speed: "", stage: "uploading" });
   const activeConn = await storage.getActiveStorageConnection();
 
   if (activeConn?.provider === "backblaze_b2") {
@@ -153,6 +154,7 @@ async function transcodeAndStoreHls(videoId: string, inputPath: string, qualitie
       lastError: null,
     } as any);
     try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
+    transcodeProgress.delete(videoId);
     log(`B2 HLS upload (AES-128 encrypted) complete for video ${videoId}`);
     return;
   }
@@ -171,6 +173,7 @@ async function transcodeAndStoreHls(videoId: string, inputPath: string, qualitie
     await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: localHlsDir, encryptionKid: enc.kid, lastError: null } as any);
     try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
   }
+  transcodeProgress.delete(videoId);
   log(`Ingest/transcode (AES-128 encrypted) complete for video ${videoId}`);
 }
 
@@ -281,11 +284,18 @@ function verifyToken(token: string): any {
 }
 
 // ffmpeg HLS processing
+const transcodeProgress = new Map<string, { time: string; speed: string; stage: string }>();
+
+function getTranscodeProgress(videoId: string): { time: string; speed: string; stage: string } | null {
+  return transcodeProgress.get(videoId) || null;
+}
+
 async function runFfmpegHls(
   inputPath: string,
   outputDir: string,
   qualities: number[],
   encryption?: { keyInfoPath: string },
+  videoId?: string,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
@@ -331,9 +341,33 @@ async function runFfmpegHls(
     args.push(path.join(outputDir, "v%v/index.m3u8"));
 
     log(`Running ffmpeg for HLS${encryption ? " (AES-128 encrypted)" : ""}...`);
+    if (videoId) transcodeProgress.set(videoId, { time: "00:00:00", speed: "0x", stage: "transcoding" });
     const proc = spawn("ffmpeg", args);
-    proc.stderr.on("data", (d) => process.stdout.write(d));
+    let stderrBuf = "";
+    proc.stderr.on("data", (d) => {
+      process.stdout.write(d);
+      if (videoId) {
+        stderrBuf += d.toString();
+        const lines = stderrBuf.split("\r");
+        stderrBuf = lines[lines.length - 1];
+        for (const line of lines) {
+          const timeMatch = line.match(/time=(\d{2}:\d{2}:\d{2}\.\d{2})/);
+          const speedMatch = line.match(/speed=\s*([\d.]+x)/);
+          if (timeMatch) {
+            transcodeProgress.set(videoId, {
+              time: timeMatch[1],
+              speed: speedMatch ? speedMatch[1] : "0x",
+              stage: "transcoding",
+            });
+          }
+        }
+      }
+    });
     proc.on("close", (code) => {
+      if (videoId) {
+        if (code === 0) transcodeProgress.set(videoId, { time: "", speed: "", stage: "uploading" });
+        else transcodeProgress.delete(videoId);
+      }
       if (code === 0) resolve();
       else reject(new Error(`ffmpeg exited with code ${code}`));
     });
@@ -530,7 +564,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const playerSettings = await storage.getPlayerSettings(v.id);
     const watermarkSettings = await storage.getWatermarkSettings(v.id);
     const securitySettings = await storage.getSecuritySettings(v.id);
-    res.json({ ...v, playerSettings, watermarkSettings, securitySettings });
+    const progress = v.status === "processing" ? getTranscodeProgress(v.id) : null;
+    res.json({ ...v, playerSettings, watermarkSettings, securitySettings, processingProgress: progress });
   });
 
   app.put("/api/videos/:id", requireAuth, async (req, res) => {
@@ -677,7 +712,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!video) return res.status(404).json({ message: "Video not found" });
 
       if (video.status === "processing") {
-        return res.status(400).json({ message: "Video is already processing" });
+        const progress = getTranscodeProgress(video.id);
+        if (progress) {
+          return res.status(400).json({ message: "Video is already processing" });
+        }
       }
 
       const rawKey = video.rawS3Key;
@@ -801,7 +839,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       (async () => {
         try {
-          await runFfmpegHls(file.path, hlsOutputDir, qualities);
+          await runFfmpegHls(file.path, hlsOutputDir, qualities, undefined, video.id);
           if (conn?.provider === "backblaze_b2") {
             const cfg = conn.config as any;
             const hlsPrefix = `${cfg.hlsPrefix || "hls/"}${video.id}/`;
@@ -823,6 +861,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           }
           try { fs.rmSync(file.path); } catch {}
           try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
+          transcodeProgress.delete(video.id);
           log(`HLS processing complete for video ${video.id}`);
         } catch (e) {
           log(`HLS processing failed for video ${video.id}: ${e}`);
