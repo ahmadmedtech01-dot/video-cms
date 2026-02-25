@@ -77,7 +77,7 @@ async function uploadToActiveStorage(localPath: string, key: string, contentType
   const active = conn ?? await storage.getActiveStorageConnection();
   if (active?.provider === "backblaze_b2") {
     const cfg = active.config as any;
-    const data = require("fs").readFileSync(localPath);
+    const data = fs.readFileSync(localPath);
     await b2UploadFile(cfg.bucket, key, data, contentType, cfg.endpoint);
     return;
   }
@@ -602,14 +602,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       await storage.updateVideo(video.id, { status: "uploading" });
 
-      const activeConn = await storage.getActiveStorageConnection();
       const qualities = req.body.qualities ? JSON.parse(req.body.qualities) : [720];
+      // Use explicitly selected connection, or fall back to active
+      const selectedConnId = req.body.connectionId as string | undefined;
+      const conn = selectedConnId
+        ? await storage.getStorageConnectionById(selectedConnId)
+        : await storage.getActiveStorageConnection();
 
-      if (activeConn?.provider === "backblaze_b2") {
-        const cfg = activeConn.config as any;
+      if (conn?.provider === "backblaze_b2") {
+        const cfg = conn.config as any;
         const rawKey = `${cfg.rawPrefix || "raw/"}${video.id}/${file.originalname}`;
-        await uploadToActiveStorage(file.path, rawKey, file.mimetype, activeConn);
-        await storage.updateVideo(video.id, { rawS3Key: rawKey, storageConnectionId: activeConn.id, status: "processing" } as any);
+        await uploadToActiveStorage(file.path, rawKey, file.mimetype, conn);
+        await storage.updateVideo(video.id, { rawS3Key: rawKey, storageConnectionId: conn.id, status: "processing" } as any);
       } else {
         // Legacy S3 or local
         const s3cfg = await getS3Config();
@@ -627,15 +631,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }
       }
 
-      // ffmpeg HLS processing (async)
+      // ffmpeg HLS processing (async) — use the same connection selected above
       const hlsOutputDir = path.join(os.tmpdir(), "vcms-hls", video.id);
       storage.updateVideo(video.id, { status: "processing" });
 
       (async () => {
         try {
           await runFfmpegHls(file.path, hlsOutputDir, qualities);
-          // transcodeAndStoreHls re-checks active connection — call upload directly
-          const conn = await storage.getActiveStorageConnection();
           if (conn?.provider === "backblaze_b2") {
             const cfg = conn.config as any;
             const hlsPrefix = `${cfg.hlsPrefix || "hls/"}${video.id}/`;

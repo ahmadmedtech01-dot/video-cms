@@ -1,19 +1,20 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useLocation } from "wouter";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Upload, Link as LinkIcon, X, CloudUpload, CheckCircle, AlertCircle, Info, Video } from "lucide-react";
+import { Upload, Link as LinkIcon, X, CloudUpload, CheckCircle, AlertCircle, Info, Video, HardDrive } from "lucide-react";
+import type { StorageConnection } from "@shared/schema";
 
 const QUALITY_OPTIONS = [
   { value: 240, label: "240p" },
@@ -71,6 +72,18 @@ export default function UploadPage() {
   const [uploadState, setUploadState] = useState<"idle" | "uploading" | "processing" | "done" | "error">("idle");
   const [sourceUrl, setSourceUrl] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  const [selectedConnectionId, setSelectedConnectionId] = useState<string>("");
+
+  const { data: storageConnections = [] } = useQuery<StorageConnection[]>({
+    queryKey: ["/api/storage-connections"],
+  });
+
+  useEffect(() => {
+    if (storageConnections.length > 0 && !selectedConnectionId) {
+      const active = storageConnections.find(c => c.isActive) ?? storageConnections[0];
+      setSelectedConnectionId(active.id);
+    }
+  }, [storageConnections, selectedConnectionId]);
 
   const urlInfo = detectUrlType(sourceUrl);
 
@@ -133,6 +146,7 @@ export default function UploadPage() {
       const formData = new FormData();
       formData.append("file", selectedFile);
       formData.append("qualities", JSON.stringify(qualities));
+      if (selectedConnectionId) formData.append("connectionId", selectedConnectionId);
 
       const xhr = new XMLHttpRequest();
       xhr.upload.addEventListener("progress", (e) => {
@@ -214,6 +228,41 @@ export default function UploadPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Storage Destination */}
+      {storageConnections.length > 0 && (
+        <Card className="border border-card-border">
+          <CardHeader className="pb-4">
+            <div className="flex items-center gap-2">
+              <HardDrive className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-base">Storage Destination</CardTitle>
+            </div>
+            <CardDescription className="text-xs mt-0.5">Choose where the uploaded video will be stored</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Select value={selectedConnectionId} onValueChange={setSelectedConnectionId} data-testid="select-storage-connection">
+              <SelectTrigger className="w-full" data-testid="trigger-storage-connection">
+                <SelectValue placeholder="Select storage destination" />
+              </SelectTrigger>
+              <SelectContent>
+                {storageConnections.map(conn => (
+                  <SelectItem key={conn.id} value={conn.id} data-testid={`option-connection-${conn.id}`}>
+                    <span className="flex items-center gap-2">
+                      {conn.name}
+                      {conn.isActive && (
+                        <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4">Active</Badge>
+                      )}
+                      <span className="text-xs text-muted-foreground capitalize">
+                        ({conn.provider === "backblaze_b2" ? "Backblaze B2" : "Amazon S3"})
+                      </span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Source */}
       <Card className="border border-card-border">
