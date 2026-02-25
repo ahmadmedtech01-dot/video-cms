@@ -92,6 +92,7 @@ export default function EmbedPlayerPage() {
   const [playerSettings, setPlayerSettings] = useState<PlayerSettings>({});
   const [watermarkSettings, setWatermarkSettings] = useState<WatermarkSettings>({});
   const [videoId, setVideoId] = useState("");
+  const [effectiveSecurity, setEffectiveSecurity] = useState<Record<string, any>>({ blockDevTools: true });
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [tickerOffset, setTickerOffset] = useState(0);
   const [playbackDenied, setPlaybackDenied] = useState(false);
@@ -148,17 +149,24 @@ export default function EmbedPlayerPage() {
         }
 
         const data = await manifestRes.json();
-        setVideoId(data.videoId || publicId);
+        const resolvedVideoId = data.videoId || "";
+        setVideoId(resolvedVideoId);
 
-        // Fetch video settings
-        try {
-          const settingsRes = await fetch(`/api/player/${publicId}/settings${qs}`);
-          if (settingsRes.ok) {
-            const s = await settingsRes.json();
-            setPlayerSettings(s.playerSettings || {});
-            setWatermarkSettings(s.watermarkSettings || {});
-          }
-        } catch {}
+        // Fetch video settings and effective security in parallel
+        await Promise.allSettled([
+          fetch(`/api/player/${publicId}/settings${qs}`).then(async r => {
+            if (r.ok) {
+              const s = await r.json();
+              setPlayerSettings(s.playerSettings || {});
+              setWatermarkSettings(s.watermarkSettings || {});
+            }
+          }),
+          resolvedVideoId
+            ? fetch(`/api/security/effective/${resolvedVideoId}`).then(async r => {
+                if (r.ok) setEffectiveSecurity(await r.json());
+              })
+            : Promise.resolve(),
+        ]);
 
         // Start session ping
         const pingRes = await fetch(`/api/player/${publicId}/ping`, {
@@ -241,9 +249,18 @@ export default function EmbedPlayerPage() {
     return () => { if (pingIntervalRef.current) clearInterval(pingIntervalRef.current); };
   }, [sessionCode, secondsWatched, publicId]);
 
+  // Focus Mode — pause playback when window loses focus
+  useEffect(() => {
+    if (!effectiveSecurity.enableFocusMode) return;
+    const onBlur = () => { videoRef.current?.pause(); };
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, [effectiveSecurity.enableFocusMode]);
+
   // DevTools detection — pauses playback when browser DevTools is open
   useEffect(() => {
     if (status !== "ready" && status !== "loading") return;
+    if (effectiveSecurity.blockDevTools === false) return;
 
     // Threshold above normal browser chrome (address bar, etc. add ~50–80px)
     const WIDTH_THRESHOLD = 160;
@@ -308,7 +325,7 @@ export default function EmbedPlayerPage() {
       window.removeEventListener("resize", onResize);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status]);
+  }, [status, effectiveSecurity.blockDevTools]);
 
   // Ticker animation
   useEffect(() => {
@@ -469,6 +486,7 @@ export default function EmbedPlayerPage() {
         onMouseMove={showControlsTemporarily}
         onMouseLeave={() => playing && setShowControls(false)}
         onClick={togglePlay}
+        onContextMenu={effectiveSecurity.disableRightClick ? e => e.preventDefault() : undefined}
       >
           {/* Video Element */}
           <video
@@ -477,6 +495,8 @@ export default function EmbedPlayerPage() {
             style={{ filter: `brightness(${brightness}%)` }}
             playsInline
             preload="metadata"
+            controlsList={effectiveSecurity.disableDownloads ? "nodownload" : undefined}
+            onContextMenu={effectiveSecurity.disableRightClick ? e => e.preventDefault() : undefined}
           />
 
           {/* Loading overlay */}

@@ -17,6 +17,7 @@ import VideoDetailPage from "@/pages/video-detail";
 import EmbedManagerPage from "@/pages/embed-manager";
 import SystemSettingsPage from "@/pages/system-settings";
 import AuditLogsPage from "@/pages/audit-logs";
+import GlobalSecurityPage from "@/pages/global-security";
 import EmbedPlayerPage from "@/pages/embed-player";
 import SharePlayerPage from "@/pages/share-player";
 import NotFound from "@/pages/not-found";
@@ -91,6 +92,7 @@ function Router() {
       <Route path="/videos/:id" component={() => <ProtectedRoute component={VideoDetailPage} />} />
       <Route path="/embeds" component={() => <ProtectedRoute component={EmbedManagerPage} />} />
       <Route path="/settings" component={() => <ProtectedRoute component={SystemSettingsPage} />} />
+      <Route path="/security" component={() => <ProtectedRoute component={GlobalSecurityPage} />} />
       <Route path="/audit" component={() => <ProtectedRoute component={AuditLogsPage} />} />
       <Route component={NotFound} />
     </Switch>

@@ -17,6 +17,7 @@ const navItems = [
   { title: "Video Library", url: "/library", icon: Library },
   { title: "Upload", url: "/upload", icon: Upload },
   { title: "Embed Manager", url: "/embeds", icon: Code2 },
+  { title: "Global Security", url: "/security", icon: Shield },
   { title: "Audit Logs", url: "/audit", icon: ScrollText },
   { title: "System Settings", url: "/settings", icon: Settings },
 ];

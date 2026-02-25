@@ -873,7 +873,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const sid = createSession(video.publicId, hlsPrefix, "backblaze_b2", cfg, conn.id);
         const proxyBase = `/hls/${video.publicId}/master.m3u8`;
         const manifestUrl = buildSignedProxyUrl(proxyBase, sid, "/master.m3u8", 60);
-        return res.json({ manifestUrl, sourceType: "b2_proxy", sessionId: sid });
+        return res.json({ manifestUrl, sourceType: "b2_proxy", sessionId: sid, videoId: video.id });
       }
 
       // Legacy S3-based HLS
@@ -1382,6 +1382,63 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       activeTokens: tokens.filter(t => !t.revoked && (!t.expiresAt || new Date(t.expiresAt) > new Date())).length,
       recentActivity: logs.slice(0, 5),
     });
+  });
+
+  // ── Global & Per-Video Client Security Settings ──────────────────────────────
+  const { getSecurityRepo } = await import("./security/securityRepoFactory");
+  const secRepo = getSecurityRepo();
+
+  app.get("/api/security/global", requireAuth, async (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const settings = await secRepo.getGlobal();
+    res.json(settings);
+  });
+
+  app.post("/api/security/global", requireAuth, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    await secRepo.saveGlobal(req.body);
+    res.json({ ok: true });
+  });
+
+  app.get("/api/security/video/:videoId", requireAuth, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const settings = await secRepo.getVideo(req.params.videoId);
+    res.json(settings);
+  });
+
+  app.post("/api/security/video/:videoId", requireAuth, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    await secRepo.saveVideo(req.params.videoId, req.body);
+    res.json({ ok: true });
+  });
+
+  app.get("/api/security/video/:videoId/use-global", requireAuth, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const useGlobal = await secRepo.getUseGlobal(req.params.videoId);
+    res.json({ useGlobal });
+  });
+
+  app.post("/api/security/video/:videoId/use-global", requireAuth, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const { useGlobal } = req.body;
+    if (typeof useGlobal !== "boolean") return res.status(400).json({ message: "useGlobal must be boolean" });
+    await secRepo.setUseGlobal(req.params.videoId, useGlobal);
+    res.json({ ok: true });
+  });
+
+  app.get("/api/security/effective/:videoId", async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const useGlobal = await secRepo.getUseGlobal(req.params.videoId);
+    if (useGlobal) {
+      const global = await secRepo.getGlobal();
+      return res.json(global);
+    }
+    const video = await secRepo.getVideo(req.params.videoId);
+    if (!video) {
+      const global = await secRepo.getGlobal();
+      return res.json(global);
+    }
+    res.json(video);
   });
 
   return httpServer;

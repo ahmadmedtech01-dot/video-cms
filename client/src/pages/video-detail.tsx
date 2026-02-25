@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { formatDistanceToNow, format } from "date-fns";
 import type { EmbedToken } from "@shared/schema";
+import { SecuritySettingsForm, defaultClientSecuritySettings, type ClientSecuritySettings } from "@/components/security-settings-form";
 
 function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);
@@ -233,6 +234,8 @@ export default function VideoDetailPage() {
   const [localPs, setLocalPs] = useState<PlayerSettings>({});
   const [localWs, setLocalWs] = useState<Record<string, any>>({});
   const [localSs, setLocalSs] = useState<Record<string, any>>({});
+  const [localCss, setLocalCss] = useState<ClientSecuritySettings>({ ...defaultClientSecuritySettings });
+  const [localUseGlobal, setLocalUseGlobal] = useState(true);
   const [previewToken, setPreviewToken] = useState("");
   const [previewKey, setPreviewKey] = useState(0);
 
@@ -281,6 +284,47 @@ export default function VideoDetailPage() {
   const updateSecurity = useMutation({
     mutationFn: (data: any) => apiRequest("PUT", `/api/videos/${id}/security-settings`, data),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/videos", id] }); toast({ title: "Security settings saved" }); refreshPreview(); },
+  });
+
+  const { data: clientSecData } = useQuery<ClientSecuritySettings | null>({
+    queryKey: ["/api/security/video", id],
+    queryFn: () => fetch(`/api/security/video/${id}`).then(r => r.json()),
+    enabled: !!id,
+  });
+
+  const { data: useGlobalData } = useQuery<{ useGlobal: boolean }>({
+    queryKey: ["/api/security/video", id, "use-global"],
+    queryFn: () => fetch(`/api/security/video/${id}/use-global`).then(r => r.json()),
+    enabled: !!id,
+  });
+
+  useEffect(() => {
+    if (useGlobalData !== undefined) setLocalUseGlobal(useGlobalData.useGlobal ?? true);
+  }, [useGlobalData]);
+
+  useEffect(() => {
+    if (clientSecData && !localUseGlobal) {
+      setLocalCss({ ...defaultClientSecuritySettings, ...clientSecData });
+    }
+  }, [clientSecData, localUseGlobal]);
+
+  const saveClientSecurity = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/security/video/${id}`, localCss),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/security/video", id] });
+      toast({ title: "Client protection settings saved" });
+    },
+    onError: () => toast({ title: "Save failed", variant: "destructive" }),
+  });
+
+  const toggleUseGlobal = useMutation({
+    mutationFn: (val: boolean) => apiRequest("POST", `/api/security/video/${id}/use-global`, { useGlobal: val }),
+    onSuccess: (_data, val) => {
+      setLocalUseGlobal(val);
+      qc.invalidateQueries({ queryKey: ["/api/security/video", id, "use-global"] });
+      toast({ title: val ? "Now using global settings" : "Now using individual settings" });
+    },
+    onError: () => toast({ title: "Update failed", variant: "destructive" }),
   });
 
   const createToken = useMutation({
@@ -835,6 +879,29 @@ export default function VideoDetailPage() {
 
         {/* Security */}
         <TabsContent value="security" className="mt-4 space-y-4">
+          {/* Use Global toggle */}
+          <Card className="border border-card-border">
+            <CardContent className="py-3 px-4">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm font-medium text-foreground">Use Global Security Settings</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">Apply the global client protection policy to this video</p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {localUseGlobal && (
+                    <Badge variant="secondary" className="text-xs" data-testid="badge-using-global">Using Global Settings</Badge>
+                  )}
+                  <Switch
+                    checked={localUseGlobal}
+                    onCheckedChange={val => toggleUseGlobal.mutate(val)}
+                    disabled={toggleUseGlobal.isPending}
+                    data-testid="switch-use-global-security"
+                  />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
           <Card className="border border-card-border">
             <CardHeader><CardTitle className="text-base">Access & Token Security</CardTitle></CardHeader>
             <CardContent>
@@ -909,6 +976,30 @@ export default function VideoDetailPage() {
                 </div>
               )}
               <SaveBar dirty={JSON.stringify(localSs) !== JSON.stringify(ss)} onSave={() => updateSecurity.mutate(localSs)} isPending={updateSecurity.isPending} />
+            </CardContent>
+          </Card>
+
+          {/* Client Protection Settings */}
+          <Card className="border border-card-border">
+            <CardHeader>
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <CardTitle className="text-base">Client Protection</CardTitle>
+                  <CardDescription className="mt-0.5">
+                    {localUseGlobal ? "Showing read-only global defaults — toggle above to override per video" : "Custom protection settings for this video"}
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <SecuritySettingsForm
+                value={localUseGlobal ? (clientSecData ? { ...defaultClientSecuritySettings, ...clientSecData } : defaultClientSecuritySettings) : localCss}
+                onChange={v => setLocalCss(v)}
+                disabled={localUseGlobal}
+                showSaveButton={!localUseGlobal}
+                onSave={() => saveClientSecurity.mutate()}
+                isPending={saveClientSecurity.isPending}
+              />
             </CardContent>
           </Card>
         </TabsContent>

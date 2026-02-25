@@ -135,6 +135,22 @@ export const systemSettings = pgTable("system_settings", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const videoClientSecurity = pgTable("video_client_security", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  videoId: uuid("video_id").notNull().references(() => videos.id, { onDelete: "cascade" }),
+  useGlobal: boolean("use_global").notNull().default(true),
+  blockVideoRecording: boolean("block_video_recording").notNull().default(false),
+  blockScreenshots: boolean("block_screenshots").notNull().default(false),
+  disableRightClick: boolean("disable_right_click").notNull().default(false),
+  blockDevTools: boolean("block_dev_tools").notNull().default(true),
+  enableFocusMode: boolean("enable_focus_mode").notNull().default(false),
+  disableDownloads: boolean("disable_downloads").notNull().default(false),
+  requireFullscreen: boolean("require_fullscreen").notNull().default(false),
+  antiScreenSharing: boolean("anti_screen_sharing").notNull().default(false),
+  violationLimit: integer("violation_limit").notNull().default(3),
+  allowedBrowsers: text("allowed_browsers").array().default(sql`'{}'::text[]`),
+});
+
 export const storageConnections = pgTable("storage_connections", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   name: text("name").notNull(),
@@ -169,6 +185,7 @@ export type PlaybackSession = typeof playbackSessions.$inferSelect;
 export type AuditLog = typeof auditLogs.$inferSelect;
 export type SystemSetting = typeof systemSettings.$inferSelect;
 export type StorageConnection = typeof storageConnections.$inferSelect;
+export type VideoClientSecurity = typeof videoClientSecurity.$inferSelect;
 export type InsertStorageConnection = z.infer<typeof insertStorageConnectionSchema>;
 
 export type InsertVideo = z.infer<typeof insertVideoSchema>;
