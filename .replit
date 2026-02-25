@@ -43,3 +43,4 @@ waitForPort = 5000
 [userenv.shared]
 ADMIN_EMAIL = "syanmedtechadmen@gmail.com"
 ADMIN_PASSWORD = "Pak@1234"
+VIMEO_ACCESS_TOKEN = "76be4d0b2eafc460ea82fc0be41e522c"
