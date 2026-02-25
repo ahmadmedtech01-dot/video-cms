@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useSearch } from "wouter";
 import Hls from "hls.js";
+import { useSecurityViolations, formatCountdown } from "@/security/useSecurityViolations";
+import type { ViolationType } from "@/security/useSecurityViolations";
 
 interface WatermarkSettings {
   logoEnabled?: boolean;
@@ -93,6 +95,10 @@ export default function EmbedPlayerPage() {
   const [watermarkSettings, setWatermarkSettings] = useState<WatermarkSettings>({});
   const [videoId, setVideoId] = useState("");
   const [effectiveSecurity, setEffectiveSecurity] = useState<Record<string, any>>({ blockDevTools: true });
+
+  // Violation counter — loaded from localStorage so it persists across refreshes
+  const { reportViolation, isBlocked, remainingMs, toast: violationToast } =
+    useSecurityViolations(videoId, effectiveSecurity);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [tickerOffset, setTickerOffset] = useState(0);
   const [playbackDenied, setPlaybackDenied] = useState(false);
@@ -249,12 +255,33 @@ export default function EmbedPlayerPage() {
     return () => { if (pingIntervalRef.current) clearInterval(pingIntervalRef.current); };
   }, [sessionCode, secondsWatched, publicId]);
 
-  // Focus Mode — pause playback when window loses focus
+  // Pause video immediately when violation cooldown block is triggered
+  useEffect(() => {
+    if (isBlocked) {
+      videoRef.current?.pause();
+    }
+  }, [isBlocked]);
+
+  // Focus Mode — pause playback and report violation when window loses focus
   useEffect(() => {
     if (!effectiveSecurity.enableFocusMode) return;
-    const onBlur = () => { videoRef.current?.pause(); };
+    const onBlur = () => {
+      videoRef.current?.pause();
+      reportViolation("FOCUS_LOST" as ViolationType);
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        videoRef.current?.pause();
+        reportViolation("FOCUS_LOST" as ViolationType);
+      }
+    };
     window.addEventListener("blur", onBlur);
-    return () => window.removeEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveSecurity.enableFocusMode]);
 
   // DevTools detection — pauses playback when browser DevTools is open
@@ -292,21 +319,13 @@ export default function EmbedPlayerPage() {
     const handleDetection = (open: boolean) => {
       if (open && !devToolsOpenRef.current) {
         devToolsOpenRef.current = true;
-        hlsRef.current?.stopLoad();
         videoRef.current?.pause();
-        triggerDenial("devtools");
+        reportViolation("DEVTOOLS_DETECTED" as ViolationType);
       } else if (!open && devToolsOpenRef.current) {
         devToolsOpenRef.current = false;
-        // Auto-resume only if DevTools was the sole cause (not a server-side ban)
-        if (denialSignalRef.current === "devtools") {
-          // Full player restart so fresh session & segment tokens are issued
-          setPlaybackDenied(false);
-          setDenialSignal("");
-          denialSignalRef.current = "";
-          hlsRef.current?.destroy();
-          hlsRef.current = null;
-          setStatus("loading");
-          setRetryKey(k => k + 1);
+        // Auto-resume if not server-blocked and not violation-blocked
+        if (!denialSignalRef.current && !isBlocked) {
+          videoRef.current?.play().catch(() => {});
         }
       }
     };
@@ -389,7 +408,13 @@ export default function EmbedPlayerPage() {
 
   const togglePlay = () => {
     const v = videoRef.current;
-    if (!v) return;
+    if (!v || isBlocked || playbackDenied) return;
+    // Fullscreen required — prompt fullscreen and count violation
+    if (effectiveSecurity.requireFullscreen && !document.fullscreenElement && v.paused) {
+      playerContainerRef.current?.requestFullscreen().catch(() => {});
+      reportViolation("FULLSCREEN_REQUIRED_BREACH" as ViolationType);
+      return;
+    }
     if (v.paused) v.play(); else v.pause();
   };
 
@@ -486,7 +511,10 @@ export default function EmbedPlayerPage() {
         onMouseMove={showControlsTemporarily}
         onMouseLeave={() => playing && setShowControls(false)}
         onClick={togglePlay}
-        onContextMenu={effectiveSecurity.disableRightClick ? e => e.preventDefault() : undefined}
+        onContextMenu={effectiveSecurity.disableRightClick ? e => {
+          e.preventDefault();
+          reportViolation("RIGHT_CLICK" as ViolationType);
+        } : undefined}
       >
           {/* Video Element */}
           <video
@@ -503,6 +531,38 @@ export default function EmbedPlayerPage() {
           {status === "loading" && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/80">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-white border-t-transparent" />
+            </div>
+          )}
+
+          {/* Violation cooldown overlay — 10-minute block */}
+          {isBlocked && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/90 z-50" data-testid="overlay-violation-blocked">
+              <div className="text-center space-y-4 px-6 max-w-sm">
+                <div className="text-5xl select-none">⏱️</div>
+                <p className="text-white text-base font-semibold leading-snug">
+                  Video access blocked
+                </p>
+                <p className="text-white/70 text-sm">
+                  Too many security violations detected.
+                </p>
+                <p className="text-white text-2xl font-mono font-bold" data-testid="text-cooldown-timer">
+                  {formatCountdown(remainingMs)}
+                </p>
+                <p className="text-white/50 text-xs">
+                  Access will resume automatically when the timer ends.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Violation toast notification */}
+          {violationToast && !isBlocked && (
+            <div
+              className={`absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-lg text-center pointer-events-none transition-opacity duration-300 ${violationToast.isBlock ? "bg-red-700/90" : "bg-amber-600/90"}`}
+              data-testid="toast-violation"
+            >
+              <p className="text-white text-sm font-semibold">{violationToast.message}</p>
+              <p className="text-white/75 text-xs mt-0.5">{violationToast.sub}</p>
             </div>
           )}
 
