@@ -312,6 +312,22 @@ export default function VideoDetailPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/videos", id] }),
   });
 
+  const buildHls = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/videos/${id}/build-hls-from-source`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to start HLS build");
+      return data;
+    },
+    onSuccess: (data) => {
+      toast({ title: "HLS build started", description: data.message });
+      qc.invalidateQueries({ queryKey: ["/api/videos", id] });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Failed to start HLS build", description: e.message, variant: "destructive" });
+    },
+  });
+
   // Must be before early returns — hooks cannot be called conditionally
   useEffect(() => {
     if (videoData?.playerSettings) setLocalPs(videoData.playerSettings);
@@ -345,6 +361,12 @@ export default function VideoDetailPage() {
   }
 
   const video = videoData;
+
+  // derivedStatus: "needs_hls" when video claims ready but HLS has never been generated
+  const isDirectM3u8 = video.sourceType === "direct_url" && video.sourceUrl && /\.m3u8/i.test(video.sourceUrl);
+  const hasHls = !!video.hlsS3Prefix || isDirectM3u8;
+  const derivedStatus: string = (video.status === "ready" && !hasHls) ? "needs_hls" : video.status;
+
   const ps = video.playerSettings || {};
   const ws = video.watermarkSettings || {};
   const ss = video.securitySettings || {};
@@ -376,8 +398,12 @@ export default function VideoDetailPage() {
           <div>
             <h1 className="text-xl font-bold text-foreground">{video.title}</h1>
             <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-              <Badge variant={video.status === "ready" ? "default" : "secondary"} className="text-xs capitalize">
-                {video.status}
+              <Badge
+                variant={derivedStatus === "ready" ? "default" : "secondary"}
+                className={`text-xs capitalize ${derivedStatus === "needs_hls" ? "bg-orange-500/15 text-orange-700 dark:text-orange-400 border-orange-500/30" : derivedStatus === "error" ? "bg-destructive/10 text-destructive" : ""}`}
+                data-testid="badge-status"
+              >
+                {derivedStatus === "needs_hls" ? "Needs HLS" : derivedStatus}
               </Badge>
               <Badge variant={video.available ? "outline" : "destructive"} className="text-xs">
                 {video.available ? "Available" : "Hidden"}
@@ -415,7 +441,7 @@ export default function VideoDetailPage() {
         {/* Overview */}
         <TabsContent value="overview" className="mt-4 space-y-4">
           {/* Processing state */}
-          {video.status === "processing" && (
+          {derivedStatus === "processing" && (
             <Card className="border border-amber-500/30 bg-amber-500/5">
               <CardContent className="pt-5">
                 <div className="flex items-center gap-3">
@@ -429,23 +455,65 @@ export default function VideoDetailPage() {
             </Card>
           )}
 
-          {/* Error state */}
-          {video.status === "error" && (
-            <Card className="border border-destructive/30 bg-destructive/5">
+          {/* Needs HLS state */}
+          {derivedStatus === "needs_hls" && (
+            <Card className="border border-orange-500/30 bg-orange-500/5">
               <CardContent className="pt-5">
                 <div className="flex items-start gap-3">
-                  <AlertCircle className="h-5 w-5 shrink-0 text-destructive mt-0.5" />
-                  <div>
-                    <p className="text-sm font-medium text-destructive">Processing failed</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">{(video as any).lastError || "An error occurred during video processing."}</p>
+                  <AlertCircle className="h-5 w-5 shrink-0 text-orange-600 dark:text-orange-400 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-orange-700 dark:text-orange-400">HLS not yet generated</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {video.sourceType === "vimeo" || video.sourceType === "vimeo_ingest"
+                        ? "This Vimeo video has not been ingested into CMS storage yet. Click below to download and convert it via the Vimeo API (requires VIMEO_ACCESS_TOKEN)."
+                        : "This video has not been converted to HLS yet. Click below to start conversion."}
+                    </p>
+                    <Button
+                      size="sm"
+                      className="mt-3"
+                      onClick={() => buildHls.mutate()}
+                      disabled={buildHls.isPending}
+                      data-testid="button-build-hls"
+                    >
+                      <Zap className="h-3.5 w-3.5 mr-1.5" />
+                      {buildHls.isPending ? "Starting…" : "Build HLS from Source"}
+                    </Button>
                   </div>
                 </div>
               </CardContent>
             </Card>
           )}
 
-          {/* Video preview link (only when ready) */}
-          {video.status === "ready" && (
+          {/* Error state */}
+          {derivedStatus === "error" && (
+            <Card className="border border-destructive/30 bg-destructive/5">
+              <CardContent className="pt-5">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="h-5 w-5 shrink-0 text-destructive mt-0.5" />
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-destructive">Processing failed</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">{(video as any).lastError || "An error occurred during video processing."}</p>
+                    {(video.sourceType === "vimeo" || video.sourceType === "vimeo_ingest") && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="mt-3"
+                        onClick={() => buildHls.mutate()}
+                        disabled={buildHls.isPending}
+                        data-testid="button-retry-build-hls"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+                        {buildHls.isPending ? "Starting…" : "Retry Build HLS"}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Video preview link (only when truly ready and HLS exists) */}
+          {derivedStatus === "ready" && (
             <Card className="border border-card-border">
               <CardHeader className="pb-2"><CardTitle className="text-base">Video Preview</CardTitle></CardHeader>
               <CardContent>
@@ -956,23 +1024,49 @@ export default function VideoDetailPage() {
                 <RefreshCw className="h-3 w-3" />Refresh
               </Button>
             </div>
-            <Card className="border border-card-border overflow-hidden bg-black">
-              <div className="relative" style={{ paddingBottom: "56.25%" }}>
-                {previewToken ? (
-                  <iframe
-                    key={previewKey}
-                    src={`/embed/${video.publicId}?token=${previewToken}`}
-                    className="absolute inset-0 w-full h-full border-0"
-                    allow="autoplay; fullscreen"
-                    title="Video Preview"
-                  />
-                ) : (
-                  <div className="absolute inset-0 flex items-center justify-center bg-black/80">
-                    <div className="h-6 w-6 animate-spin rounded-full border-2 border-white border-t-transparent" />
+            {derivedStatus === "needs_hls" ? (
+              <Card className="border border-orange-500/30 bg-orange-500/5">
+                <CardContent className="pt-5 pb-4 space-y-3">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 shrink-0 text-orange-600 dark:text-orange-400 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-medium text-orange-700 dark:text-orange-400">HLS not available</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        This video has not been converted to HLS for the custom player yet.
+                      </p>
+                    </div>
                   </div>
-                )}
-              </div>
-            </Card>
+                  <Button
+                    size="sm"
+                    className="w-full"
+                    onClick={() => buildHls.mutate()}
+                    disabled={buildHls.isPending}
+                    data-testid="button-build-hls-preview"
+                  >
+                    <Zap className="h-3.5 w-3.5 mr-1.5" />
+                    {buildHls.isPending ? "Starting…" : "Build HLS from Source"}
+                  </Button>
+                </CardContent>
+              </Card>
+            ) : (
+              <Card className="border border-card-border overflow-hidden bg-black">
+                <div className="relative" style={{ paddingBottom: "56.25%" }}>
+                  {previewToken ? (
+                    <iframe
+                      key={previewKey}
+                      src={`/embed/${video.publicId}?token=${previewToken}`}
+                      className="absolute inset-0 w-full h-full border-0"
+                      allow="autoplay; fullscreen"
+                      title="Video Preview"
+                    />
+                  ) : (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/80">
+                      <div className="h-6 w-6 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                    </div>
+                  )}
+                </div>
+              </Card>
+            )}
             <p className="text-xs text-muted-foreground text-center">Preview reflects saved settings. Click Refresh after saving changes.</p>
           </div>
         </div>

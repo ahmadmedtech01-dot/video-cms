@@ -16,7 +16,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import {
   Plus, Search, MoreVertical, Play, Settings, Eye, EyeOff, Trash2,
-  Video, Clock, AlertCircle, CheckCircle, Upload, RefreshCw,
+  Video, Clock, AlertCircle, CheckCircle, Upload, RefreshCw, Zap,
 } from "lucide-react";
 import { useState } from "react";
 import { formatDistanceToNow } from "date-fns";
@@ -26,8 +26,17 @@ const statusConfig: Record<string, { label: string; color: string; icon: any }> 
   uploading: { label: "Uploading", color: "bg-blue-500/10 text-blue-600 dark:text-blue-400", icon: Upload },
   processing: { label: "Processing", color: "bg-amber-500/10 text-amber-600 dark:text-amber-400", icon: RefreshCw },
   ready: { label: "Ready", color: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400", icon: CheckCircle },
+  needs_hls: { label: "Needs HLS", color: "bg-orange-500/10 text-orange-600 dark:text-orange-400", icon: Zap },
   error: { label: "Error", color: "bg-red-500/10 text-red-600 dark:text-red-400", icon: AlertCircle },
 };
+
+function getDerivedStatus(video: any): string {
+  if (video.status === "ready") {
+    const isDirectM3u8 = video.sourceType === "direct_url" && video.sourceUrl && /\.m3u8/i.test(video.sourceUrl);
+    if (!video.hlsS3Prefix && !isDirectM3u8) return "needs_hls";
+  }
+  return video.status;
+}
 
 export default function LibraryPage() {
   const qc = useQueryClient();
@@ -113,7 +122,8 @@ export default function LibraryPage() {
       ) : (
         <div className="space-y-2">
           {filtered.map(video => {
-            const status = statusConfig[video.status] || statusConfig.error;
+            const derived = getDerivedStatus(video);
+            const status = statusConfig[derived] || statusConfig.error;
             const StatusIcon = status.icon;
             return (
               <Card key={video.id} className="border border-card-border hover-elevate" data-testid={`card-video-${video.id}`}>

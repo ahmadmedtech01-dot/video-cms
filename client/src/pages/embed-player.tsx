@@ -112,6 +112,11 @@ export default function EmbedPlayerPage() {
           const data = await manifestRes.json().catch(() => ({}));
           if (manifestRes.status === 503) { setStatus("unavailable"); return; }
           if (manifestRes.status === 403) { setStatus("unavailable"); setErrorMsg(data.message || "Access denied"); return; }
+          if (manifestRes.status === 409 && data.code === "HLS_NOT_AVAILABLE") {
+            setStatus("error");
+            setErrorMsg("HLS not available — this video has not been converted for our custom player yet. An admin needs to build the HLS from the video source.");
+            return;
+          }
           setStatus("error");
           setErrorMsg(data.message || "Failed to load video");
           return;

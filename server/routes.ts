@@ -461,6 +461,51 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // ── Build / rebuild HLS from existing source URL ───────────
+  app.post("/api/videos/:id/build-hls-from-source", requireAuth, async (req, res) => {
+    try {
+      const video = await storage.getVideoById(req.params.id);
+      if (!video) return res.status(404).json({ message: "Video not found" });
+
+      const { sourceType, sourceUrl } = video;
+
+      if (sourceType === "youtube" || sourceType === "youtube_blocked") {
+        return res.status(400).json({ message: "YouTube links cannot be converted. Please upload the video file directly." });
+      }
+
+      if (sourceType === "vimeo" || sourceType === "vimeo_ingest") {
+        if (!sourceUrl) return res.status(400).json({ message: "No source URL on this video." });
+        await storage.updateVideo(video.id, { status: "processing", lastError: null } as any);
+        ingestVimeoVideo(video.id, sourceUrl).catch(async (e: Error) => {
+          log(`Build HLS (Vimeo) failed for ${video.id}: ${e.message}`);
+          await storage.updateVideo(video.id, { status: "error", lastError: e.message } as any);
+        });
+        await storage.createAuditLog({ action: "video_build_hls_started", meta: { videoId: video.id, sourceType }, ip: req.ip });
+        return res.json({ ok: true, message: "Vimeo ingest started. The video will be ready in a few minutes." });
+      }
+
+      if (sourceType === "direct_url") {
+        if (!sourceUrl) return res.status(400).json({ message: "No source URL on this video." });
+        if (/\.m3u8/i.test(sourceUrl)) {
+          // Already a direct HLS URL, mark ready
+          await storage.updateVideo(video.id, { status: "ready" } as any);
+          return res.json({ ok: true, message: "Video is a direct HLS stream and is now marked ready." });
+        }
+        await storage.updateVideo(video.id, { status: "processing", lastError: null } as any);
+        ingestDirectMp4(video.id, sourceUrl).catch(async (e: Error) => {
+          log(`Build HLS (direct MP4) failed for ${video.id}: ${e.message}`);
+          await storage.updateVideo(video.id, { status: "error", lastError: e.message } as any);
+        });
+        await storage.createAuditLog({ action: "video_build_hls_started", meta: { videoId: video.id, sourceType }, ip: req.ip });
+        return res.json({ ok: true, message: "HLS conversion started. The video will be ready in a few minutes." });
+      }
+
+      return res.status(400).json({ message: `Cannot auto-generate HLS for sourceType '${sourceType}'. Please re-upload the video file.` });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.post("/api/videos/:id/toggle-availability", requireAuth, async (req, res) => {
     const v = await storage.getVideoById(req.params.id);
     if (!v) return res.status(404).json({ message: "Not found" });
@@ -712,14 +757,23 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       // Direct external m3u8 (admin-provided HLS stream URL)
-      if (video.sourceType === "direct_url" && video.sourceUrl && /\.m3u8/i.test(video.sourceUrl)) {
+      const isDirectM3u8 = video.sourceType === "direct_url" && video.sourceUrl && /\.m3u8/i.test(video.sourceUrl);
+      if (isDirectM3u8) {
         return res.json({ manifestUrl: video.sourceUrl, sourceType: "hls", videoId: video.id });
+      }
+
+      // If no HLS prefix at all, return structured 409 so the frontend can show a fix action
+      if (!video.hlsS3Prefix) {
+        return res.status(409).json({
+          code: "HLS_NOT_AVAILABLE",
+          message: "HLS has not been generated for this video yet. Go to the video settings and click 'Build HLS from Source' to convert it.",
+        });
       }
 
       // S3-based HLS
       const client = await getS3Client();
       const cfg = await getS3Config();
-      const hlsPrefix = video.hlsS3Prefix || `${cfg.hlsPrefix}${video.id}/`;
+      const hlsPrefix = video.hlsS3Prefix;
 
       if (client && cfg.bucket) {
         const masterKey = `${hlsPrefix}master.m3u8`;
@@ -729,10 +783,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       // Local HLS fallback
-      const localHlsDir = video.hlsS3Prefix || path.join(uploadDir, "hls", video.id);
+      const localHlsDir = video.hlsS3Prefix;
       const masterPath = path.join(localHlsDir, "master.m3u8");
       if (!fs.existsSync(masterPath)) {
-        return res.status(404).json({ message: "HLS not available" });
+        return res.status(409).json({ code: "HLS_NOT_AVAILABLE", message: "HLS files not found on disk. Re-upload the video or use Build HLS from Source." });
       }
 
       return res.json({
