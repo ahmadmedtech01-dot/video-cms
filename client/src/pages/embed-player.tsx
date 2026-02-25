@@ -441,7 +441,7 @@ export default function EmbedPlayerPage() {
       reportViolation("FULLSCREEN_REQUIRED_BREACH" as ViolationType);
       return;
     }
-    if (v.paused) v.play(); else v.pause();
+    if (v.paused) v.play().catch(() => {}); else v.pause();
   };
 
   const reportProgressNow = (time: number) => {
