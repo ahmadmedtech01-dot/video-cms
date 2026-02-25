@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useParams, Link } from "wouter";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,8 @@ import {
   ArrowLeft, Eye, EyeOff, ExternalLink, Copy, CheckCircle, RefreshCw,
   Key, Shield, Droplets, Settings2, BarChart3, ScrollText, Code2,
   Plus, Trash2, AlertCircle, Video, Clock,
+  Play, SkipBack, SkipForward, Volume2, Maximize, Sun, Gauge, Layers,
+  RotateCcw, Zap,
 } from "lucide-react";
 import { formatDistanceToNow, format } from "date-fns";
 import type { EmbedToken } from "@shared/schema";
@@ -50,6 +52,160 @@ function SettingRow({ label, description, children }: { label: string; descripti
   );
 }
 
+interface PlayerSettings {
+  allowSpeed?: boolean;
+  allowQuality?: boolean;
+  allowFullscreen?: boolean;
+  allowSkip?: boolean;
+  allowBrightness?: boolean;
+  resumeEnabled?: boolean;
+  autoplayAllowed?: boolean;
+  startTime?: number;
+  endTime?: number;
+}
+
+function PlayerPreview({ ps }: { ps: PlayerSettings }) {
+  const [fakeProgress] = useState(38);
+
+  return (
+    <div className="sticky top-4">
+      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Live Preview</p>
+      <div
+        className="relative w-full rounded-xl overflow-hidden shadow-2xl border border-white/10"
+        style={{ aspectRatio: "16/9", background: "linear-gradient(135deg, #0f0f0f 0%, #1a1a2e 50%, #0f0f0f 100%)" }}
+        data-testid="player-preview"
+      >
+        {/* Fake video content */}
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="flex flex-col items-center gap-2 opacity-30">
+            <Video className="h-12 w-12 text-white" />
+            <span className="text-white text-xs">Preview</span>
+          </div>
+        </div>
+
+        {/* Autoplay badge */}
+        {ps.autoplayAllowed && (
+          <div className="absolute top-3 left-3 flex items-center gap-1 bg-black/60 backdrop-blur-sm rounded px-2 py-0.5">
+            <Zap className="h-3 w-3 text-yellow-400" />
+            <span className="text-[10px] text-yellow-300 font-medium">Autoplay</span>
+          </div>
+        )}
+
+        {/* Resume badge */}
+        {ps.resumeEnabled && (
+          <div className="absolute top-3 right-3 flex items-center gap-1 bg-black/60 backdrop-blur-sm rounded px-2 py-0.5">
+            <RotateCcw className="h-3 w-3 text-blue-400" />
+            <span className="text-[10px] text-blue-300 font-medium">Resume</span>
+          </div>
+        )}
+
+        {/* Control bar */}
+        <div
+          className="absolute bottom-0 left-0 right-0 px-3 pt-6 pb-2.5"
+          style={{ background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, transparent 100%)" }}
+        >
+          {/* Progress bar */}
+          <div className="mb-2.5 relative">
+            <div className="h-1 w-full rounded-full bg-white/20 overflow-hidden cursor-pointer">
+              <div
+                className="h-full rounded-full bg-white transition-all"
+                style={{ width: `${fakeProgress}%`, opacity: ps.allowSkip ? 1 : 0.4 }}
+              />
+            </div>
+            {ps.allowSkip && (
+              <div
+                className="absolute top-1/2 -translate-y-1/2 h-3 w-3 bg-white rounded-full shadow-md"
+                style={{ left: `calc(${fakeProgress}% - 6px)` }}
+              />
+            )}
+          </div>
+
+          {/* Controls row */}
+          <div className="flex items-center gap-1.5">
+            {/* Always: play */}
+            <button className="text-white/90 hover:text-white p-0.5">
+              <Play className="h-4 w-4 fill-current" />
+            </button>
+
+            {/* Skip back/forward */}
+            {ps.allowSkip && (
+              <>
+                <button className="text-white/70 hover:text-white p-0.5">
+                  <SkipBack className="h-3.5 w-3.5" />
+                </button>
+                <button className="text-white/70 hover:text-white p-0.5">
+                  <SkipForward className="h-3.5 w-3.5" />
+                </button>
+              </>
+            )}
+
+            {/* Time */}
+            <span className="text-white/60 text-[10px] ml-0.5 tabular-nums">1:32 / 4:07</span>
+
+            {/* Spacer */}
+            <div className="flex-1" />
+
+            {/* Brightness */}
+            {ps.allowBrightness && (
+              <button className="text-white/70 hover:text-white p-0.5" title="Brightness">
+                <Sun className="h-3.5 w-3.5" />
+              </button>
+            )}
+
+            {/* Speed */}
+            {ps.allowSpeed && (
+              <div className="flex items-center gap-0.5 text-white/70 hover:text-white cursor-pointer p-0.5">
+                <Gauge className="h-3.5 w-3.5" />
+                <span className="text-[10px] font-medium">1×</span>
+              </div>
+            )}
+
+            {/* Quality */}
+            {ps.allowQuality && (
+              <div className="flex items-center gap-0.5 text-white/70 hover:text-white cursor-pointer p-0.5">
+                <Layers className="h-3.5 w-3.5" />
+                <span className="text-[10px] font-medium">Auto</span>
+              </div>
+            )}
+
+            {/* Volume */}
+            <button className="text-white/70 hover:text-white p-0.5">
+              <Volume2 className="h-3.5 w-3.5" />
+            </button>
+
+            {/* Fullscreen */}
+            {ps.allowFullscreen && (
+              <button className="text-white/70 hover:text-white p-0.5">
+                <Maximize className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Feature legend */}
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {[
+          { key: "allowSkip", label: "Seek & Skip", color: "bg-blue-500/15 text-blue-400 border-blue-500/20" },
+          { key: "allowSpeed", label: "Speed", color: "bg-purple-500/15 text-purple-400 border-purple-500/20" },
+          { key: "allowQuality", label: "Quality", color: "bg-amber-500/15 text-amber-400 border-amber-500/20" },
+          { key: "allowBrightness", label: "Brightness", color: "bg-yellow-500/15 text-yellow-400 border-yellow-500/20" },
+          { key: "allowFullscreen", label: "Fullscreen", color: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20" },
+          { key: "autoplayAllowed", label: "Autoplay", color: "bg-red-500/15 text-red-400 border-red-500/20" },
+          { key: "resumeEnabled", label: "Resume", color: "bg-cyan-500/15 text-cyan-400 border-cyan-500/20" },
+        ].map(f => (
+          <span
+            key={f.key}
+            className={`text-[10px] px-2 py-0.5 rounded border font-medium transition-opacity ${f.color} ${ps[f.key as keyof PlayerSettings] ? "opacity-100" : "opacity-30"}`}
+          >
+            {f.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function VideoDetailPage() {
   const { id } = useParams<{ id: string }>();
   const qc = useQueryClient();
@@ -61,6 +217,7 @@ export default function VideoDetailPage() {
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false);
   const [domainInput, setDomainInput] = useState("");
   const [baseUrl, setBaseUrl] = useState(() => window.location.origin);
+  const [localPs, setLocalPs] = useState<PlayerSettings>({});
 
   const { data: videoData, isLoading } = useQuery({
     queryKey: ["/api/videos", id],
@@ -150,6 +307,11 @@ export default function VideoDetailPage() {
   const video = videoData;
   const ps = video.playerSettings || {};
   const ws = video.watermarkSettings || {};
+
+  // Keep localPs in sync with saved settings (updates after each save)
+  useEffect(() => {
+    setLocalPs(video.playerSettings || {});
+  }, [video.playerSettings]);
   const ss = video.securitySettings || {};
   const firstToken = tokens.find(t => !t.revoked);
   const embedSrc = firstToken
@@ -267,47 +429,57 @@ export default function VideoDetailPage() {
 
         {/* Player Settings */}
         <TabsContent value="player" className="mt-4">
-          <Card className="border border-card-border">
-            <CardHeader>
-              <CardTitle className="text-base">Player Controls</CardTitle>
-              <CardDescription>Configure what the viewer can interact with</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {[
-                { key: "allowSpeed", label: "Speed Control", desc: "Allow playback speed adjustment (0.5x–3x)" },
-                { key: "allowQuality", label: "Quality Selection", desc: "Allow viewer to switch between quality levels" },
-                { key: "allowFullscreen", label: "Fullscreen", desc: "Allow fullscreen mode" },
-                { key: "allowSkip", label: "Seek / Skip", desc: "Allow seeking and ±10s skip buttons" },
-                { key: "allowBrightness", label: "Brightness Control", desc: "Allow brightness adjustment via CSS filter" },
-                { key: "resumeEnabled", label: "Resume Playback", desc: "Resume from last watched position" },
-                { key: "autoplayAllowed", label: "Autoplay", desc: "Attempt autoplay on embed load (muted)" },
-              ].map(s => (
-                <SettingRow key={s.key} label={s.label} description={s.desc}>
-                  <Switch
-                    checked={!!ps[s.key]}
-                    onCheckedChange={val => updatePlayer.mutate({ ...ps, [s.key]: val })}
-                    data-testid={`switch-${s.key}`}
-                  />
-                </SettingRow>
-              ))}
-              <div className="mt-4 grid grid-cols-2 gap-4">
-                <div className="space-y-1.5">
-                  <Label>Start Time (seconds)</Label>
-                  <Input
-                    type="number" min={0} defaultValue={ps.startTime || 0}
-                    onBlur={e => updatePlayer.mutate({ ...ps, startTime: parseInt(e.target.value) || 0 })}
-                  />
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-5 items-start">
+            {/* Settings panel */}
+            <Card className="border border-card-border">
+              <CardHeader>
+                <CardTitle className="text-base">Player Controls</CardTitle>
+                <CardDescription>Configure what the viewer can interact with</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {[
+                  { key: "allowSpeed", label: "Speed Control", desc: "Allow playback speed adjustment (0.5x–3x)" },
+                  { key: "allowQuality", label: "Quality Selection", desc: "Allow viewer to switch between quality levels" },
+                  { key: "allowFullscreen", label: "Fullscreen", desc: "Allow fullscreen mode" },
+                  { key: "allowSkip", label: "Seek / Skip", desc: "Allow seeking and ±10s skip buttons" },
+                  { key: "allowBrightness", label: "Brightness Control", desc: "Allow brightness adjustment via CSS filter" },
+                  { key: "resumeEnabled", label: "Resume Playback", desc: "Resume from last watched position" },
+                  { key: "autoplayAllowed", label: "Autoplay", desc: "Attempt autoplay on embed load (muted)" },
+                ].map(s => (
+                  <SettingRow key={s.key} label={s.label} description={s.desc}>
+                    <Switch
+                      checked={!!localPs[s.key as keyof PlayerSettings]}
+                      onCheckedChange={val => {
+                        const next = { ...localPs, [s.key]: val };
+                        setLocalPs(next);
+                        updatePlayer.mutate({ ...ps, [s.key]: val });
+                      }}
+                      data-testid={`switch-${s.key}`}
+                    />
+                  </SettingRow>
+                ))}
+                <div className="mt-4 grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <Label>Start Time (seconds)</Label>
+                    <Input
+                      type="number" min={0} defaultValue={ps.startTime || 0}
+                      onBlur={e => updatePlayer.mutate({ ...ps, startTime: parseInt(e.target.value) || 0 })}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>End Time (seconds, 0 = full)</Label>
+                    <Input
+                      type="number" min={0} defaultValue={ps.endTime || 0}
+                      onBlur={e => updatePlayer.mutate({ ...ps, endTime: parseInt(e.target.value) || null })}
+                    />
+                  </div>
                 </div>
-                <div className="space-y-1.5">
-                  <Label>End Time (seconds, 0 = full)</Label>
-                  <Input
-                    type="number" min={0} defaultValue={ps.endTime || 0}
-                    onBlur={e => updatePlayer.mutate({ ...ps, endTime: parseInt(e.target.value) || null })}
-                  />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+
+            {/* Live preview panel */}
+            <PlayerPreview ps={localPs} />
+          </div>
         </TabsContent>
 
         {/* Watermark Settings */}
