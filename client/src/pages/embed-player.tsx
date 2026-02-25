@@ -659,11 +659,35 @@ export default function EmbedPlayerPage() {
               style={{ opacity: ws.tickerOpacity ?? 0.7 }}
             >
               <div
-                className="whitespace-nowrap text-white text-sm font-medium py-0.5 px-2 bg-black/40"
-                style={{ transform: `translateX(${tickerOffset % (tickerText.length * 12 + 800)}px)` }}
+                className="whitespace-nowrap font-medium py-0.5 px-2"
+                style={{
+                  color: ws.tickerTextColor || "#FFFFFF",
+                  fontSize: `${ws.tickerFontSizePx || 14}px`,
+                  backgroundColor: ws.tickerBgColor ? `${ws.tickerBgColor}66` : "rgba(0,0,0,0.4)",
+                  transform: `translateX(${tickerOffset % (tickerText.length * 12 + 800)}px)`,
+                }}
               >
                 {tickerText} &nbsp;&nbsp;&nbsp;&nbsp;{tickerText}
               </div>
+            </div>
+          )}
+
+          {/* Author Name Overlay */}
+          {ws.authorEnabled && (ws.authorName || videoId) && (
+            <div
+              className="absolute top-3 right-3 pointer-events-none px-3 py-1.5 rounded"
+              style={{
+                color: ws.authorTextColor || "#FFFFFF",
+                fontSize: `${ws.authorFontSizePx || 14}px`,
+                opacity: ws.authorOpacity ?? 0.8,
+                backgroundColor: ws.authorBgColor && ws.authorBgColor !== "transparent" ? ws.authorBgColor : "transparent",
+                fontWeight: (ws.authorTextStyle === "bold" || ws.authorTextStyle === "bold_italic") ? "bold" : "normal",
+                fontStyle: (ws.authorTextStyle === "italic" || ws.authorTextStyle === "bold_italic") ? "italic" : "normal",
+                zIndex: 30,
+              }}
+              data-testid="overlay-author-name"
+            >
+              {ws.authorName || ""}
             </div>
           )}
 

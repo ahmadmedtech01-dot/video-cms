@@ -718,6 +718,85 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json(s);
   });
 
+  // ── Media Asset Upload (logo / watermark images) ────────────────────────
+  app.post("/api/assets/:type/upload", requireAuth, upload.single("file"), async (req: any, res: any) => {
+    try {
+      const assetType = req.params.type;
+      if (!["logo", "watermark"].includes(assetType)) return res.status(400).json({ message: "Type must be logo or watermark" });
+      if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+
+      const conn = await storage.getActiveStorageConnection();
+      if (!conn || conn.provider !== "backblaze_b2") return res.status(400).json({ message: "No active B2 storage connection" });
+
+      const cfg = conn.config as any;
+      const ext = path.extname(req.file.originalname) || ".png";
+      const uniqueId = nanoid(12);
+      const bucketKey = `assets/${assetType}s/${uniqueId}${ext}`;
+
+      await b2UploadFile(cfg.bucket, bucketKey, fs.readFileSync(req.file.path), req.file.mimetype, cfg.endpoint);
+
+      const asset = await storage.createMediaAsset({
+        type: assetType,
+        bucketKey,
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        storageConnectionId: conn.id,
+      });
+
+      try { fs.unlinkSync(req.file.path); } catch {}
+
+      await storage.createAuditLog({ action: `${assetType}_uploaded`, meta: { assetId: asset.id, bucketKey }, ip: req.ip });
+
+      res.json({ assetId: asset.id, bucketKey, previewUrl: `/api/assets/${asset.id}/view` });
+    } catch (e: any) {
+      log(`Asset upload error: ${e.message}`);
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/assets/:assetId/view", async (req: any, res: any) => {
+    try {
+      const asset = await storage.getMediaAssetById(req.params.assetId);
+      if (!asset) return res.status(404).json({ message: "Asset not found" });
+
+      const conn = asset.storageConnectionId
+        ? await storage.getStorageConnectionById(asset.storageConnectionId)
+        : await storage.getActiveStorageConnection();
+      if (!conn || conn.provider !== "backblaze_b2") return res.status(500).json({ message: "Storage not available" });
+
+      const cfg = conn.config as any;
+      const signedUrl = await b2PresignGetObject(cfg.bucket, asset.bucketKey, cfg.endpoint, 60);
+      const fetchRes = await fetch(signedUrl);
+      if (!fetchRes.ok) return res.status(404).json({ message: "File not found in storage" });
+
+      res.setHeader("Content-Type", asset.mimeType);
+      res.setHeader("Cache-Control", "public, max-age=3600");
+      const arrayBuf = await fetchRes.arrayBuffer();
+      res.send(Buffer.from(arrayBuf));
+    } catch (e: any) {
+      log(`Asset view error: ${e.message}`);
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/assets", requireAuth, async (_req: any, res: any) => {
+    const assets = await storage.getMediaAssets();
+    res.json(assets);
+  });
+
+  // ── Global Watermark Defaults ──────────────────────────────────────────
+  app.get("/api/watermark/global", requireAuth, async (_req: any, res: any) => {
+    const value = await storage.getSetting("global_watermark");
+    if (!value) return res.json({});
+    try { res.json(JSON.parse(value)); } catch { res.json({}); }
+  });
+
+  app.put("/api/watermark/global", requireAuth, async (req: any, res: any) => {
+    await storage.setSetting("global_watermark", JSON.stringify(req.body));
+    await storage.createAuditLog({ action: "global_watermark_updated", meta: req.body, ip: req.ip });
+    res.json(req.body);
+  });
+
   app.put("/api/videos/:id/security-settings", requireAuth, async (req, res) => {
     const s = await storage.upsertSecuritySettings(req.params.id, req.body);
     await storage.createAuditLog({ action: "security_settings_updated", meta: { videoId: req.params.id }, ip: req.ip });

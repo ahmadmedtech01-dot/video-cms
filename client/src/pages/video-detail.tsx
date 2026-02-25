@@ -233,6 +233,7 @@ export default function VideoDetailPage() {
   const [baseUrl, setBaseUrl] = useState(() => window.location.origin);
   const [localPs, setLocalPs] = useState<PlayerSettings>({});
   const [localWs, setLocalWs] = useState<Record<string, any>>({});
+  const [logoUploading, setLogoUploading] = useState(false);
   const [localSs, setLocalSs] = useState<Record<string, any>>({});
   const [localCss, setLocalCss] = useState<ClientSecuritySettings>({ ...defaultClientSecuritySettings });
   const [localUseGlobal, setLocalUseGlobal] = useState(true);
@@ -769,18 +770,54 @@ export default function VideoDetailPage() {
             <CardHeader><CardTitle className="text-base">Logo Watermark</CardTitle></CardHeader>
             <CardContent>
               <SettingRow label="Enable Logo" description="Show a logo image overlay on the player">
-                <Switch checked={!!localWs.logoEnabled} onCheckedChange={val => setLocalWs(p => ({ ...p, logoEnabled: val }))} />
+                <Switch checked={!!localWs.logoEnabled} onCheckedChange={val => setLocalWs(p => ({ ...p, logoEnabled: val }))} data-testid="switch-logo-enabled" />
               </SettingRow>
               {localWs.logoEnabled && (
                 <div className="mt-4 space-y-4">
                   <div className="space-y-1.5">
-                    <Label>Logo URL</Label>
-                    <Input defaultValue={localWs.logoUrl || ""} placeholder="https://..." onChange={e => setLocalWs(p => ({ ...p, logoUrl: e.target.value }))} />
+                    <Label>Upload Logo Image</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="file"
+                        accept="image/*"
+                        data-testid="input-logo-upload"
+                        disabled={logoUploading}
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          setLogoUploading(true);
+                          try {
+                            const fd = new FormData();
+                            fd.append("file", file);
+                            const resp = await fetch("/api/assets/logo/upload", { method: "POST", body: fd, credentials: "include" });
+                            if (!resp.ok) throw new Error((await resp.json()).message || "Upload failed");
+                            const data = await resp.json();
+                            setLocalWs(p => ({ ...p, logoUrl: data.previewUrl }));
+                            toast({ title: "Logo uploaded", description: file.name });
+                          } catch (err: any) {
+                            toast({ title: "Upload failed", description: err.message, variant: "destructive" });
+                          } finally {
+                            setLogoUploading(false);
+                          }
+                        }}
+                      />
+                      {logoUploading && <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />}
+                    </div>
+                    {localWs.logoUrl && (
+                      <div className="mt-2 flex items-center gap-3">
+                        <img src={localWs.logoUrl} alt="Logo preview" className="h-10 max-w-[120px] object-contain rounded border" />
+                        <span className="text-xs text-muted-foreground truncate max-w-[200px]">{localWs.logoUrl}</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Or Enter Logo URL</Label>
+                    <Input value={localWs.logoUrl || ""} placeholder="https://..." onChange={e => setLocalWs(p => ({ ...p, logoUrl: e.target.value }))} data-testid="input-logo-url" />
                   </div>
                   <div className="space-y-1.5">
                     <Label>Position</Label>
                     <Select value={localWs.logoPosition || "top-right"} onValueChange={val => setLocalWs(p => ({ ...p, logoPosition: val }))}>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectTrigger data-testid="select-logo-position"><SelectValue /></SelectTrigger>
                       <SelectContent>
                         {["top-left","top-right","bottom-left","bottom-right","center"].map(pos => (
                           <SelectItem key={pos} value={pos}>{pos}</SelectItem>
@@ -803,14 +840,14 @@ export default function VideoDetailPage() {
             <CardHeader><CardTitle className="text-base">Scrolling Ticker</CardTitle></CardHeader>
             <CardContent>
               <SettingRow label="Enable Ticker" description="Show a scrolling text banner">
-                <Switch checked={!!localWs.tickerEnabled} onCheckedChange={val => setLocalWs(p => ({ ...p, tickerEnabled: val }))} />
+                <Switch checked={!!localWs.tickerEnabled} onCheckedChange={val => setLocalWs(p => ({ ...p, tickerEnabled: val }))} data-testid="switch-ticker-enabled" />
               </SettingRow>
               {localWs.tickerEnabled && (
                 <div className="mt-4 space-y-4">
                   <div className="space-y-1.5">
                     <Label>Ticker Text</Label>
-                    <Input defaultValue={localWs.tickerText || ""} placeholder="Use {DOMAIN} {VIDEO_ID} {SESSION_CODE} {TIME}"
-                      onChange={e => setLocalWs(p => ({ ...p, tickerText: e.target.value }))} />
+                    <Input value={localWs.tickerText || ""} placeholder="Use {DOMAIN} {VIDEO_ID} {SESSION_CODE} {TIME}"
+                      onChange={e => setLocalWs(p => ({ ...p, tickerText: e.target.value }))} data-testid="input-ticker-text" />
                     <p className="text-xs text-muted-foreground">Variables: {"{DOMAIN}"} {"{VIDEO_ID}"} {"{SESSION_CODE}"} {"{TIME}"}</p>
                   </div>
                   <div className="space-y-2">
@@ -823,6 +860,85 @@ export default function VideoDetailPage() {
                     <Slider value={[(localWs.tickerOpacity ?? 0.7) * 100]} min={10} max={100} step={5}
                       onValueChange={([v]) => setLocalWs(p => ({ ...p, tickerOpacity: v / 100 }))} />
                   </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label>Text Color</Label>
+                      <div className="flex items-center gap-2">
+                        <input type="color" value={localWs.tickerTextColor || "#FFFFFF"} onChange={e => setLocalWs(p => ({ ...p, tickerTextColor: e.target.value }))} className="w-8 h-8 rounded border cursor-pointer" data-testid="input-ticker-text-color" />
+                        <Input value={localWs.tickerTextColor || "#FFFFFF"} onChange={e => setLocalWs(p => ({ ...p, tickerTextColor: e.target.value }))} className="font-mono text-xs" />
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Background Color</Label>
+                      <div className="flex items-center gap-2">
+                        <input type="color" value={localWs.tickerBgColor || "#000000"} onChange={e => setLocalWs(p => ({ ...p, tickerBgColor: e.target.value }))} className="w-8 h-8 rounded border cursor-pointer" data-testid="input-ticker-bg-color" />
+                        <Input value={localWs.tickerBgColor || "#000000"} onChange={e => setLocalWs(p => ({ ...p, tickerBgColor: e.target.value }))} className="font-mono text-xs" />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Font Size: {localWs.tickerFontSizePx || 14}px</Label>
+                    <Slider value={[localWs.tickerFontSizePx || 14]} min={8} max={32} step={1}
+                      onValueChange={([v]) => setLocalWs(p => ({ ...p, tickerFontSizePx: v }))} />
+                  </div>
+                </div>
+              )}
+              <SaveBar dirty={JSON.stringify(localWs) !== JSON.stringify(ws)} onSave={() => updateWatermark.mutate(localWs)} isPending={updateWatermark.isPending} />
+            </CardContent>
+          </Card>
+
+          <Card className="border border-card-border">
+            <CardHeader><CardTitle className="text-base">Author Name Overlay</CardTitle></CardHeader>
+            <CardContent>
+              <SettingRow label="Enable Author Overlay" description="Show author name on the top-right corner of the video">
+                <Switch checked={!!localWs.authorEnabled} onCheckedChange={val => setLocalWs(p => ({ ...p, authorEnabled: val }))} data-testid="switch-author-enabled" />
+              </SettingRow>
+              {localWs.authorEnabled && (
+                <div className="mt-4 space-y-4">
+                  <div className="space-y-1.5">
+                    <Label>Author Name</Label>
+                    <Input value={localWs.authorName || video?.author || ""} placeholder="Author name"
+                      onChange={e => setLocalWs(p => ({ ...p, authorName: e.target.value }))} data-testid="input-author-name" />
+                    <p className="text-xs text-muted-foreground">Leave blank to use the video&apos;s author field</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label>Text Color</Label>
+                      <div className="flex items-center gap-2">
+                        <input type="color" value={localWs.authorTextColor || "#FFFFFF"} onChange={e => setLocalWs(p => ({ ...p, authorTextColor: e.target.value }))} className="w-8 h-8 rounded border cursor-pointer" data-testid="input-author-text-color" />
+                        <Input value={localWs.authorTextColor || "#FFFFFF"} onChange={e => setLocalWs(p => ({ ...p, authorTextColor: e.target.value }))} className="font-mono text-xs" />
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Background Color</Label>
+                      <div className="flex items-center gap-2">
+                        <input type="color" value={(localWs.authorBgColor && localWs.authorBgColor !== "transparent") ? localWs.authorBgColor : "#000000"} onChange={e => setLocalWs(p => ({ ...p, authorBgColor: e.target.value }))} className="w-8 h-8 rounded border cursor-pointer" data-testid="input-author-bg-color" />
+                        <Input value={localWs.authorBgColor || "transparent"} onChange={e => setLocalWs(p => ({ ...p, authorBgColor: e.target.value }))} className="font-mono text-xs" placeholder="transparent" />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Font Size: {localWs.authorFontSizePx || 14}px</Label>
+                    <Slider value={[localWs.authorFontSizePx || 14]} min={8} max={32} step={1}
+                      onValueChange={([v]) => setLocalWs(p => ({ ...p, authorFontSizePx: v }))} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Opacity: {Math.round((localWs.authorOpacity ?? 0.8) * 100)}%</Label>
+                    <Slider value={[(localWs.authorOpacity ?? 0.8) * 100]} min={0} max={100} step={5}
+                      onValueChange={([v]) => setLocalWs(p => ({ ...p, authorOpacity: v / 100 }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Text Style</Label>
+                    <Select value={localWs.authorTextStyle || "normal"} onValueChange={val => setLocalWs(p => ({ ...p, authorTextStyle: val }))}>
+                      <SelectTrigger data-testid="select-author-text-style"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="normal">Normal</SelectItem>
+                        <SelectItem value="bold">Bold</SelectItem>
+                        <SelectItem value="italic">Italic</SelectItem>
+                        <SelectItem value="bold_italic">Bold Italic</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
               )}
               <SaveBar dirty={JSON.stringify(localWs) !== JSON.stringify(ws)} onSave={() => updateWatermark.mutate(localWs)} isPending={updateWatermark.isPending} />
@@ -833,7 +949,7 @@ export default function VideoDetailPage() {
             <CardHeader><CardTitle className="text-base">Pop-up Watermark</CardTitle></CardHeader>
             <CardContent>
               <SettingRow label="Enable Pop Watermark" description="Show periodic pop-up text overlays">
-                <Switch checked={!!localWs.popEnabled} onCheckedChange={val => setLocalWs(p => ({ ...p, popEnabled: val }))} />
+                <Switch checked={!!localWs.popEnabled} onCheckedChange={val => setLocalWs(p => ({ ...p, popEnabled: val }))} data-testid="switch-pop-enabled" />
               </SettingRow>
               {localWs.popEnabled && (
                 <div className="mt-4 space-y-4">

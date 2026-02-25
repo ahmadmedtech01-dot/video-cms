@@ -68,7 +68,8 @@ Signing secret: auto-derived from `SESSION_SECRET`; override with `SIGNING_SECRE
 - `admin_users` — single admin account
 - `videos` — video metadata, status, S3 keys
 - `video_player_settings` — per-video player config
-- `video_watermark_settings` — logo, ticker, pop-up watermark
+- `video_watermark_settings` — logo, ticker (with color/size/bg), author overlay, pop-up watermark
+- `media_assets` — uploaded logo/watermark images (stored in same video bucket)
 - `video_security_settings` — token, domain, signed URL config
 - `embed_tokens` — JWT tokens with expiry and domain restriction
 - `playback_sessions` — analytics sessions

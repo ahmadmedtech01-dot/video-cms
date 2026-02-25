@@ -77,6 +77,16 @@ export const videoWatermarkSettings = pgTable("video_watermark_settings", {
   popMode: text("pop_mode").notNull().default("random"),
   popOpacity: real("pop_opacity").notNull().default(0.8),
   popText: text("pop_text").default("{DOMAIN}"),
+  tickerTextColor: text("ticker_text_color").notNull().default("#FFFFFF"),
+  tickerFontSizePx: integer("ticker_font_size_px").notNull().default(14),
+  tickerBgColor: text("ticker_bg_color").notNull().default("#000000"),
+  authorEnabled: boolean("author_enabled").notNull().default(false),
+  authorName: text("author_name").default(""),
+  authorFontSizePx: integer("author_font_size_px").notNull().default(14),
+  authorTextColor: text("author_text_color").notNull().default("#FFFFFF"),
+  authorOpacity: real("author_opacity").notNull().default(0.8),
+  authorBgColor: text("author_bg_color").notNull().default("transparent"),
+  authorTextStyle: text("author_text_style").notNull().default("normal"),
 });
 
 export const videoSecuritySettings = pgTable("video_security_settings", {
@@ -160,6 +170,16 @@ export const storageConnections = pgTable("storage_connections", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const mediaAssets = pgTable("media_assets", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  type: text("type").notNull(),
+  bucketKey: text("bucket_key").notNull(),
+  originalName: text("original_name").notNull(),
+  mimeType: text("mime_type").notNull(),
+  storageConnectionId: uuid("storage_connection_id"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const insertVideoSchema = createInsertSchema(videos).omit({
   id: true,
   createdAt: true,
@@ -186,6 +206,7 @@ export type AuditLog = typeof auditLogs.$inferSelect;
 export type SystemSetting = typeof systemSettings.$inferSelect;
 export type StorageConnection = typeof storageConnections.$inferSelect;
 export type VideoClientSecurity = typeof videoClientSecurity.$inferSelect;
+export type MediaAsset = typeof mediaAssets.$inferSelect;
 export type InsertStorageConnection = z.infer<typeof insertStorageConnectionSchema>;
 
 export type InsertVideo = z.infer<typeof insertVideoSchema>;

@@ -1,10 +1,10 @@
 import { db } from "./db";
 import {
   adminUsers, videos, videoPlayerSettings, videoWatermarkSettings,
-  videoSecuritySettings, embedTokens, playbackSessions, auditLogs, systemSettings, storageConnections,
+  videoSecuritySettings, embedTokens, playbackSessions, auditLogs, systemSettings, storageConnections, mediaAssets,
   type AdminUser, type Video, type VideoPlayerSettings, type VideoWatermarkSettings,
   type VideoSecuritySettings, type EmbedToken, type PlaybackSession, type AuditLog,
-  type SystemSetting, type StorageConnection,
+  type SystemSetting, type StorageConnection, type MediaAsset,
 } from "@shared/schema";
 import { eq, desc, and, sql } from "drizzle-orm";
 
@@ -224,5 +224,19 @@ export const storage = {
   async setActiveStorageConnection(id: string): Promise<void> {
     await db.update(storageConnections).set({ isActive: false });
     await db.update(storageConnections).set({ isActive: true }).where(eq(storageConnections.id, id));
+  },
+
+  async createMediaAsset(data: { type: string; bucketKey: string; originalName: string; mimeType: string; storageConnectionId?: string | null }): Promise<MediaAsset> {
+    const [a] = await db.insert(mediaAssets).values(data as any).returning();
+    return a;
+  },
+
+  async getMediaAssetById(id: string): Promise<MediaAsset | undefined> {
+    const [a] = await db.select().from(mediaAssets).where(eq(mediaAssets.id, id));
+    return a;
+  },
+
+  async getMediaAssets(): Promise<MediaAsset[]> {
+    return db.select().from(mediaAssets).orderBy(desc(mediaAssets.createdAt));
   },
 };
