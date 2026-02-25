@@ -37,15 +37,31 @@ A full-stack secure video content management system for a single admin user.
 - `/v/:publicId?token=...` — masked share link page
 - Both support: hls.js playback, watermark overlays, token validation, domain checking
 
-### Video Security Pipeline (Non-DRM)
+### Video Security Pipeline (Non-DRM, 3-Layer Protection)
 Secure HLS proxy — B2/S3 origin URLs are **never** sent to the frontend:
-- `GET /api/player/:publicId/manifest` creates an in-memory `VideoSession` and returns a signed proxy URL
-- `GET /hls/:publicId/*` — fetches playlists server-side, rewrites all URLs to proxy with HMAC tokens + 30s expiry for variants
-- `GET /seg/:publicId/*` — fetches segment bytes from B2/S3, streams with 15s signed tokens
+
+**Layer 1 — Origin Hidden**: All storage URLs are proxied server-side. Browser only ever sees `/hls/` and `/seg/` endpoints on our domain.
+- `GET /api/player/:publicId/manifest` creates an in-memory `VideoSession` (with deviceHash binding) and returns a signed proxy URL
+- `GET /hls/:publicId/*` — fetches playlists server-side, rewrites all URLs to proxy with HMAC tokens
+- `GET /seg/:publicId/*` — fetches segment bytes from B2/S3, streams to client
 - `GET /key/:publicId` — AES-128 key endpoint (ready for when ffmpeg encryption is enabled)
 - `POST /api/video/session` — alternative session creation endpoint for custom players
-- Abuse detection: sessions revoked after >25 requests in 5s; frontend shows "Video playback denied" overlay
-- Signing secret: auto-derived from `SESSION_SECRET`; override with `SIGNING_SECRET` env var
+
+**Layer 2 — Per-Chunk Signed Tokens**: Every segment URL includes an HMAC token (15s TTL) binding `sid`, path, expiry, and `deviceHash` (SHA256 of User-Agent). Segments from different browsers/devices are rejected. 3-second clock skew tolerance.
+
+**Layer 3 — Sliding Window Playlist**: Variant playlists return only the next 6 segments (not the entire video). The playlist is served as a live-like HLS stream (no `#EXT-X-ENDLIST` until the final window). hls.js reloads it periodically and only sees segments in the current window. Progress tracked via `POST /api/stream/:publicId/progress` (every 10s) and via segment access (auto-advances window when segments are fetched).
+
+**Abuse Detection** (server/video-session.ts): Sessions revoked when abuse score reaches 10:
+- Rate limit: >25 requests/5s → +5 score
+- Concurrent segments: >3 simultaneous → +5
+- Playlist abuse: >30 fetches/min → +3
+- IP mismatch: different IP on same session → +8
+- Out-of-window: segment request outside [current-1, current+6] → +3 (after 3 violations)
+- Key abuse: >8 key requests/min → +5
+
+**Client-Side Protection** (useSecurityViolations hook): Violation counter with per-video localStorage persistence, 3s debounce per event type, configurable limit. On limit reached: 10-minute cooldown with countdown overlay. Events: RIGHT_CLICK, FOCUS_LOST, DEVTOOLS_DETECTED, FULLSCREEN_REQUIRED_BREACH, DOWNLOAD_ATTEMPT.
+
+Signing secret: auto-derived from `SESSION_SECRET`; override with `SIGNING_SECRET` env var
 
 ## Database Tables
 
@@ -59,6 +75,7 @@ Secure HLS proxy — B2/S3 origin URLs are **never** sent to the frontend:
 - `audit_logs` — admin action log
 - `system_settings` — key-value config store (AWS, kill switch, Vimeo token, etc.)
 - `storage_connections` — named storage providers (Backblaze B2 / AWS S3) with config + active flag
+- `video_client_security` — per-video client-side security overrides (violations, fullscreen, etc.)
 - `user_sessions` — express session store
 
 ## Key API Routes

@@ -69,10 +69,12 @@ export default function EmbedPlayerPage() {
   const hlsRef = useRef<Hls | null>(null);
   const playerContainerRef = useRef<HTMLDivElement>(null);
   const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const popIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const controlsTimerRef = useRef<NodeJS.Timeout | null>(null);
   const devToolsCheckRef = useRef<NodeJS.Timeout | null>(null);
   const devToolsOpenRef = useRef(false);
+  const streamSidRef = useRef("");
   const denialSignalRef = useRef("");
 
   const [status, setStatus] = useState<"loading" | "ready" | "error" | "unavailable" | "processing">("loading");
@@ -187,12 +189,19 @@ export default function EmbedPlayerPage() {
 
         const manifestUrl = data.manifestUrl;
         if (!manifestUrl) { setStatus("error"); setErrorMsg("No manifest URL"); return; }
+        if (data.sessionId) streamSidRef.current = data.sessionId;
 
         if (!videoRef.current) return;
         const video = videoRef.current;
 
         if (Hls.isSupported()) {
-          const hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+          const hls = new Hls({
+            enableWorker: true,
+            lowLatencyMode: false,
+            liveSyncDurationCount: 99,
+            liveMaxLatencyDurationCount: Infinity,
+            maxBufferLength: 30,
+          });
           hlsRef.current = hls;
           hls.loadSource(manifestUrl);
           hls.attachMedia(video);
@@ -238,6 +247,7 @@ export default function EmbedPlayerPage() {
     return () => {
       hlsRef.current?.destroy();
       if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+      if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
       if (popIntervalRef.current) clearInterval(popIntervalRef.current);
     };
   }, [publicId, token, retryKey]);
@@ -254,6 +264,22 @@ export default function EmbedPlayerPage() {
     }, 30000);
     return () => { if (pingIntervalRef.current) clearInterval(pingIntervalRef.current); };
   }, [sessionCode, secondsWatched, publicId]);
+
+  // Progress reporting for sliding window — every 15 seconds
+  useEffect(() => {
+    const sid = streamSidRef.current;
+    if (!sid || !publicId) return;
+    progressIntervalRef.current = setInterval(() => {
+      const v = videoRef.current;
+      if (!v || v.paused) return;
+      fetch(`/api/stream/${publicId}/progress`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sid, currentTime: v.currentTime }),
+      }).catch(() => {});
+    }, 10000);
+    return () => { if (progressIntervalRef.current) clearInterval(progressIntervalRef.current); };
+  }, [publicId, status]);
 
   // Pause video immediately when violation cooldown block is triggered
   useEffect(() => {
@@ -418,16 +444,28 @@ export default function EmbedPlayerPage() {
     if (v.paused) v.play(); else v.pause();
   };
 
+  const reportProgressNow = (time: number) => {
+    const sid = streamSidRef.current;
+    if (!sid || !publicId) return;
+    fetch(`/api/stream/${publicId}/progress`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sid, currentTime: time }),
+    }).catch(() => {});
+  };
+
   const seek = (delta: number) => {
     const v = videoRef.current;
     if (!v || !playerSettings.allowSkip) return;
     v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + delta));
+    reportProgressNow(v.currentTime);
   };
 
   const handleSeekBar = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = videoRef.current;
     if (!v || !playerSettings.allowSkip) return;
     v.currentTime = parseFloat(e.target.value);
+    reportProgressNow(v.currentTime);
   };
 
   const handleVolume = (e: React.ChangeEvent<HTMLInputElement>) => {

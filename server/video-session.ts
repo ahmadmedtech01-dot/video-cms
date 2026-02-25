@@ -11,19 +11,31 @@ function resolveSecret(): string {
 
 const SECRET = resolveSecret();
 
-// Abuse signal thresholds
 const ABUSE_THRESHOLDS = {
-  requestsPerWindow: 25,       // max requests per 5s window
+  requestsPerWindow: 25,
   requestWindowMs: 5000,
-  concurrentSegments: 6,       // max simultaneous segment requests per session
-  playlistFetchesPerMin: 12,   // max playlist fetches per 60s (repeated reload = abuse)
-  keyHitsPerMin: 8,            // max key requests per 60s
-  scoreToRevoke: 10,           // revoke when abuseScore reaches this
+  concurrentSegments: 3,
+  playlistFetchesPerMin: 30,
+  keyHitsPerMin: 8,
+  scoreToRevoke: 10,
+  windowSize: 6,
+  outOfWindowPenalty: 3,
 };
 
 export interface AbuseReason {
-  signal: "rate_limit" | "concurrent" | "playlist_abuse" | "key_abuse" | "ip_mismatch";
+  signal: "rate_limit" | "concurrent" | "playlist_abuse" | "key_abuse" | "ip_mismatch" | "out_of_window";
   detail: string;
+}
+
+export interface ParsedSegment {
+  extinf: string;
+  uri: string;
+}
+
+export interface PlaylistCache {
+  header: string;
+  segments: ParsedSegment[];
+  targetDuration: number;
 }
 
 export interface VideoSession {
@@ -36,26 +48,21 @@ export interface VideoSession {
   revoked: boolean;
   revokeReason: AbuseReason | null;
   abuseScore: number;
-
-  // Rate limiting
   requestLog: number[];
-
-  // Concurrent segment tracking
   concurrentSegments: number;
-
-  // Playlist fetch tracking (to detect repeated playlist abuse)
   playlistFetchLog: number[];
-
-  // Key endpoint hit tracking
   keyHitLog: number[];
-
-  // IP binding (first IP wins; subsequent different IPs are flagged)
   boundIp: string | null;
+
+  deviceHash: string;
+  currentSegmentIndex: number;
+  lastProgressAt: number;
+  outOfWindowCount: number;
+  variantCache: Map<string, PlaylistCache>;
 }
 
 const sessions = new Map<string, VideoSession>();
 
-// Evict sessions older than 30 minutes every 5 minutes
 setInterval(() => {
   const cutoff = Date.now() - 30 * 60 * 1000;
   for (const [id, s] of sessions) {
@@ -63,12 +70,17 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
+export function computeDeviceHash(ua: string): string {
+  return crypto.createHash("sha256").update(ua || "unknown-ua").digest("hex").slice(0, 16);
+}
+
 export function createSession(
   publicId: string,
   hlsPrefix: string,
   storageProvider: "backblaze_b2" | "s3" | "local",
   storageConfig: any,
   connId: string | null,
+  deviceHash?: string,
 ): string {
   const sid = crypto.randomBytes(16).toString("hex");
   sessions.set(sid, {
@@ -86,6 +98,11 @@ export function createSession(
     playlistFetchLog: [],
     keyHitLog: [],
     boundIp: null,
+    deviceHash: deviceHash || "",
+    currentSegmentIndex: 0,
+    lastProgressAt: Date.now(),
+    outOfWindowCount: 0,
+    variantCache: new Map(),
   });
   return sid;
 }
@@ -102,14 +119,16 @@ export function revokeSession(sid: string, reason?: AbuseReason): void {
   }
 }
 
-export function signPath(sid: string, resourcePath: string, exp: number): string {
-  const payload = `${sid}|${resourcePath}|${exp}`;
+export function signPath(sid: string, resourcePath: string, exp: number, deviceHash?: string): string {
+  let payload = `${sid}|${resourcePath}|${exp}`;
+  if (deviceHash) payload += `|${deviceHash}`;
   return crypto.createHmac("sha256", SECRET).update(payload).digest("hex");
 }
 
-export function verifySignedPath(sid: string, resourcePath: string, exp: number, st: string): boolean {
-  if (Math.floor(Date.now() / 1000) > exp) return false;
-  const expected = signPath(sid, resourcePath, exp);
+export function verifySignedPath(sid: string, resourcePath: string, exp: number, st: string, deviceHash?: string, clockSkewSec?: number): boolean {
+  const tolerance = clockSkewSec ?? 0;
+  if (Math.floor(Date.now() / 1000) > exp + tolerance) return false;
+  const expected = signPath(sid, resourcePath, exp, deviceHash);
   try {
     const a = Buffer.from(expected, "hex");
     const b = Buffer.from(st, "hex");
@@ -130,13 +149,11 @@ function addAbuse(s: VideoSession, delta: number, reason: AbuseReason): { abused
   return { abused: false };
 }
 
-// ── Signal 1: General request rate ───────────────────────────────────────────
 export function trackRequest(sid: string, ip?: string): { abused: boolean; reason?: AbuseReason } {
   const s = sessions.get(sid);
   if (!s) return { abused: true, reason: { signal: "rate_limit", detail: "Session not found" } };
   if (s.revoked) return { abused: true, reason: s.revokeReason ?? { signal: "rate_limit", detail: "Session revoked" } };
 
-  // IP binding check — bind first IP seen; flag if a different IP uses same session
   if (ip) {
     if (!s.boundIp) {
       s.boundIp = ip;
@@ -146,7 +163,6 @@ export function trackRequest(sid: string, ip?: string): { abused: boolean; reaso
     }
   }
 
-  // Rate window
   const now = Date.now();
   s.requestLog = s.requestLog.filter(t => t > now - ABUSE_THRESHOLDS.requestWindowMs);
   s.requestLog.push(now);
@@ -159,7 +175,6 @@ export function trackRequest(sid: string, ip?: string): { abused: boolean; reaso
   return { abused: false };
 }
 
-// ── Signal 2: Playlist fetch abuse ───────────────────────────────────────────
 export function trackPlaylistFetch(sid: string, ip?: string): { abused: boolean; reason?: AbuseReason } {
   const base = trackRequest(sid, ip);
   if (base.abused) return base;
@@ -177,7 +192,6 @@ export function trackPlaylistFetch(sid: string, ip?: string): { abused: boolean;
   return { abused: false };
 }
 
-// ── Signal 3: Concurrent segment connections ──────────────────────────────────
 export function acquireSegment(sid: string, ip?: string): { abused: boolean; reason?: AbuseReason } {
   const base = trackRequest(sid, ip);
   if (base.abused) return base;
@@ -187,7 +201,6 @@ export function acquireSegment(sid: string, ip?: string): { abused: boolean; rea
 
   if (s.concurrentSegments > ABUSE_THRESHOLDS.concurrentSegments) {
     const reason: AbuseReason = { signal: "concurrent", detail: `${s.concurrentSegments} concurrent segment requests (limit: ${ABUSE_THRESHOLDS.concurrentSegments})` };
-    // Decrement back since we won't serve this
     s.concurrentSegments -= 1;
     return addAbuse(s, 5, reason);
   }
@@ -200,7 +213,6 @@ export function releaseSegment(sid: string): void {
   if (s && s.concurrentSegments > 0) s.concurrentSegments -= 1;
 }
 
-// ── Signal 4: Encryption key endpoint hits ────────────────────────────────────
 export function trackKeyHit(sid: string, ip?: string): { abused: boolean; reason?: AbuseReason } {
   const base = trackRequest(sid, ip);
   if (base.abused) return base;
@@ -218,15 +230,92 @@ export function trackKeyHit(sid: string, ip?: string): { abused: boolean; reason
   return { abused: false };
 }
 
-// Build a signed proxy URL with sid/st/exp query params
-export function buildSignedProxyUrl(baseUrl: string, sid: string, resourcePath: string, ttlSeconds: number): string {
+export function buildSignedProxyUrl(baseUrl: string, sid: string, resourcePath: string, ttlSeconds: number, deviceHash?: string): string {
   const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
-  const st = signPath(sid, resourcePath, exp);
+  const st = signPath(sid, resourcePath, exp, deviceHash);
   const sep = baseUrl.includes("?") ? "&" : "?";
   return `${baseUrl}${sep}sid=${encodeURIComponent(sid)}&st=${encodeURIComponent(st)}&exp=${exp}`;
 }
 
-// Snapshot of session abuse state for debugging/logging
+export function updateProgress(sid: string, segmentIndex: number): boolean {
+  const s = sessions.get(sid);
+  if (!s || s.revoked) return false;
+  s.currentSegmentIndex = Math.max(0, segmentIndex);
+  s.lastProgressAt = Date.now();
+  return true;
+}
+
+export function getWindowRange(sid: string): { start: number; end: number } {
+  const s = sessions.get(sid);
+  if (!s) return { start: 0, end: ABUSE_THRESHOLDS.windowSize };
+  const start = Math.max(0, s.currentSegmentIndex - 1);
+  const end = s.currentSegmentIndex + ABUSE_THRESHOLDS.windowSize;
+  return { start, end };
+}
+
+export function validateSegmentWindow(sid: string, segIndex: number): { allowed: boolean; reason?: AbuseReason } {
+  const s = sessions.get(sid);
+  if (!s) return { allowed: false, reason: { signal: "rate_limit", detail: "Session not found" } };
+  if (s.revoked) return { allowed: false, reason: s.revokeReason ?? { signal: "rate_limit", detail: "Session revoked" } };
+
+  const { start, end } = getWindowRange(sid);
+
+  if (segIndex >= start && segIndex <= end) {
+    if (segIndex > s.currentSegmentIndex) {
+      s.currentSegmentIndex = segIndex;
+    }
+    return { allowed: true };
+  }
+
+  s.outOfWindowCount += 1;
+  if (s.outOfWindowCount >= 3) {
+    const reason: AbuseReason = { signal: "out_of_window", detail: `Segment ${segIndex} outside window [${start},${end}] (${s.outOfWindowCount} violations)` };
+    return { allowed: !addAbuse(s, ABUSE_THRESHOLDS.outOfWindowPenalty, reason).abused, reason };
+  }
+
+  return { allowed: true };
+}
+
+export function parsePlaylist(playlistText: string): PlaylistCache {
+  const lines = playlistText.split("\n");
+  const headerLines: string[] = [];
+  const segments: ParsedSegment[] = [];
+  let targetDuration = 4;
+  let inSegments = false;
+  let pendingExtinf = "";
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === "#EXT-X-ENDLIST") continue;
+
+    if (trimmed.startsWith("#EXT-X-TARGETDURATION:")) {
+      targetDuration = parseInt(trimmed.split(":")[1], 10) || 4;
+    }
+
+    if (trimmed.startsWith("#EXTINF:")) {
+      inSegments = true;
+      pendingExtinf = trimmed;
+      continue;
+    }
+
+    if (pendingExtinf && trimmed && !trimmed.startsWith("#")) {
+      segments.push({ extinf: pendingExtinf, uri: trimmed });
+      pendingExtinf = "";
+      continue;
+    }
+
+    if (!inSegments) {
+      if (trimmed && trimmed !== "#EXT-X-ENDLIST") {
+        headerLines.push(trimmed);
+      }
+    }
+    pendingExtinf = "";
+  }
+
+  const header = headerLines.filter(l => !l.startsWith("#EXT-X-MEDIA-SEQUENCE")).join("\n");
+  return { header, segments, targetDuration };
+}
+
 export function getSessionAbuseSummary(sid: string) {
   const s = sessions.get(sid);
   if (!s) return null;
@@ -241,5 +330,7 @@ export function getSessionAbuseSummary(sid: string) {
     playlistFetches: s.playlistFetchLog.length,
     keyHits: s.keyHitLog.length,
     boundIp: s.boundIp,
+    currentSegmentIndex: s.currentSegmentIndex,
+    outOfWindowCount: s.outOfWindowCount,
   };
 }
