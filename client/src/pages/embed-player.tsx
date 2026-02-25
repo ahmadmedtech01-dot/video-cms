@@ -555,14 +555,18 @@ export default function EmbedPlayerPage() {
             </div>
           )}
 
-          {/* Violation toast notification */}
+          {/* Violation popup — centered, red, prominent */}
           {violationToast && !isBlocked && (
             <div
-              className={`absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-lg text-center pointer-events-none transition-opacity duration-300 ${violationToast.isBlock ? "bg-red-700/90" : "bg-amber-600/90"}`}
+              className="absolute inset-0 flex items-center justify-center z-50 pointer-events-none"
               data-testid="toast-violation"
             >
-              <p className="text-white text-sm font-semibold">{violationToast.message}</p>
-              <p className="text-white/75 text-xs mt-0.5">{violationToast.sub}</p>
+              <div className="bg-red-600 rounded-xl px-8 py-6 text-center shadow-2xl border border-red-400/40 min-w-[220px] max-w-[80%]">
+                <div className="text-2xl mb-2 select-none">🚨</div>
+                <p className="text-white text-lg font-bold tracking-wide uppercase">Security Breach</p>
+                <p className="text-white/90 text-base font-semibold mt-1">{violationToast.message}</p>
+                <p className="text-white/65 text-xs mt-2">{violationToast.sub}</p>
+              </div>
             </div>
           )}
 
