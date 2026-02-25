@@ -52,6 +52,36 @@ function SettingRow({ label, description, children }: { label: string; descripti
   );
 }
 
+function toPreviewUrl(sourceType: string, url: string): string | null {
+  if (!url) return null;
+  try {
+    if (sourceType === "youtube") {
+      const parsed = new URL(url);
+      let id = parsed.searchParams.get("v");
+      if (!id && parsed.hostname === "youtu.be") id = parsed.pathname.slice(1).split("?")[0];
+      if (id) return `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1`;
+    }
+    if (sourceType === "vimeo") {
+      const parsed = new URL(url);
+      const m = parsed.pathname.match(/\/(\d+)/);
+      if (m) return `https://player.vimeo.com/video/${m[1]}?badge=0&autopause=0`;
+    }
+  } catch {}
+  return null;
+}
+
+function SaveBar({ dirty, onSave, isPending }: { dirty: boolean; onSave: () => void; isPending: boolean }) {
+  if (!dirty) return null;
+  return (
+    <div className="flex items-center justify-between gap-3 mt-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+      <p className="text-sm text-amber-700 dark:text-amber-400 font-medium">You have unsaved changes</p>
+      <Button size="sm" onClick={onSave} disabled={isPending} data-testid="button-save-settings">
+        {isPending ? "Saving…" : "Save Settings"}
+      </Button>
+    </div>
+  );
+}
+
 interface PlayerSettings {
   allowSpeed?: boolean;
   allowQuality?: boolean;
@@ -218,6 +248,8 @@ export default function VideoDetailPage() {
   const [domainInput, setDomainInput] = useState("");
   const [baseUrl, setBaseUrl] = useState(() => window.location.origin);
   const [localPs, setLocalPs] = useState<PlayerSettings>({});
+  const [localWs, setLocalWs] = useState<Record<string, any>>({});
+  const [localSs, setLocalSs] = useState<Record<string, any>>({});
 
   const { data: videoData, isLoading } = useQuery({
     queryKey: ["/api/videos", id],
@@ -287,10 +319,10 @@ export default function VideoDetailPage() {
 
   // Must be before early returns — hooks cannot be called conditionally
   useEffect(() => {
-    if (videoData?.playerSettings) {
-      setLocalPs(videoData.playerSettings);
-    }
-  }, [videoData?.playerSettings]);
+    if (videoData?.playerSettings) setLocalPs(videoData.playerSettings);
+    if (videoData?.watermarkSettings) setLocalWs(videoData.watermarkSettings);
+    if (videoData?.securitySettings) setLocalSs(videoData.securitySettings);
+  }, [videoData?.playerSettings, videoData?.watermarkSettings, videoData?.securitySettings]);
 
   if (isLoading) {
     return (
@@ -334,6 +366,7 @@ export default function VideoDetailPage() {
 </iframe>`;
 
   return (
+    <>
     <div className="p-6 space-y-5 max-w-5xl">
       {/* Header */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -377,6 +410,52 @@ export default function VideoDetailPage() {
 
         {/* Overview */}
         <TabsContent value="overview" className="mt-4 space-y-4">
+          {/* Video preview */}
+          {(() => {
+            const previewUrl = toPreviewUrl(video.sourceType, video.sourceUrl);
+            if (previewUrl) return (
+              <Card className="border border-card-border overflow-hidden">
+                <CardHeader className="pb-2"><CardTitle className="text-base">Video Preview</CardTitle></CardHeader>
+                <CardContent className="p-0">
+                  <div className="relative w-full" style={{ paddingBottom: "56.25%" }}>
+                    <iframe
+                      src={previewUrl}
+                      className="absolute inset-0 w-full h-full"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                      allowFullScreen
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+            );
+            if (video.sourceType === "s3" || video.sourceType === "upload" || video.sourceType === "local") return (
+              <Card className="border border-card-border">
+                <CardHeader className="pb-2"><CardTitle className="text-base">Video Preview</CardTitle></CardHeader>
+                <CardContent>
+                  <a
+                    href={`/embed/${video.publicId}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 text-sm text-primary hover:underline"
+                  >
+                    <ExternalLink className="h-4 w-4" />Open player in new tab
+                  </a>
+                </CardContent>
+              </Card>
+            );
+            if (video.sourceUrl) return (
+              <Card className="border border-card-border">
+                <CardHeader className="pb-2"><CardTitle className="text-base">Video Preview</CardTitle></CardHeader>
+                <CardContent>
+                  <a href={video.sourceUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-sm text-primary hover:underline">
+                    <ExternalLink className="h-4 w-4" />Open source URL
+                  </a>
+                </CardContent>
+              </Card>
+            );
+            return null;
+          })()}
+
           <Card className="border border-card-border">
             <CardHeader><CardTitle className="text-base">Video Information</CardTitle></CardHeader>
             <CardContent className="space-y-4">
@@ -451,11 +530,7 @@ export default function VideoDetailPage() {
                   <SettingRow key={s.key} label={s.label} description={s.desc}>
                     <Switch
                       checked={!!localPs[s.key as keyof PlayerSettings]}
-                      onCheckedChange={val => {
-                        const next = { ...localPs, [s.key]: val };
-                        setLocalPs(next);
-                        updatePlayer.mutate({ ...ps, [s.key]: val });
-                      }}
+                      onCheckedChange={val => setLocalPs(prev => ({ ...prev, [s.key]: val }))}
                       data-testid={`switch-${s.key}`}
                     />
                   </SettingRow>
@@ -465,17 +540,22 @@ export default function VideoDetailPage() {
                     <Label>Start Time (seconds)</Label>
                     <Input
                       type="number" min={0} defaultValue={ps.startTime || 0}
-                      onBlur={e => updatePlayer.mutate({ ...ps, startTime: parseInt(e.target.value) || 0 })}
+                      onChange={e => setLocalPs(prev => ({ ...prev, startTime: parseInt(e.target.value) || 0 }))}
                     />
                   </div>
                   <div className="space-y-1.5">
                     <Label>End Time (seconds, 0 = full)</Label>
                     <Input
                       type="number" min={0} defaultValue={ps.endTime || 0}
-                      onBlur={e => updatePlayer.mutate({ ...ps, endTime: parseInt(e.target.value) || null })}
+                      onChange={e => setLocalPs(prev => ({ ...prev, endTime: parseInt(e.target.value) || 0 }))}
                     />
                   </div>
                 </div>
+                <SaveBar
+                  dirty={JSON.stringify(localPs) !== JSON.stringify(ps)}
+                  onSave={() => updatePlayer.mutate(localPs)}
+                  isPending={updatePlayer.isPending}
+                />
               </CardContent>
             </Card>
 
@@ -490,35 +570,33 @@ export default function VideoDetailPage() {
             <CardHeader><CardTitle className="text-base">Logo Watermark</CardTitle></CardHeader>
             <CardContent>
               <SettingRow label="Enable Logo" description="Show a logo image overlay on the player">
-                <Switch checked={!!ws.logoEnabled} onCheckedChange={val => updateWatermark.mutate({ ...ws, logoEnabled: val })} />
+                <Switch checked={!!localWs.logoEnabled} onCheckedChange={val => setLocalWs(p => ({ ...p, logoEnabled: val }))} />
               </SettingRow>
-              {ws.logoEnabled && (
+              {localWs.logoEnabled && (
                 <div className="mt-4 space-y-4">
                   <div className="space-y-1.5">
                     <Label>Logo URL</Label>
-                    <Input defaultValue={ws.logoUrl || ""} placeholder="https://..." onBlur={e => updateWatermark.mutate({ ...ws, logoUrl: e.target.value })} />
+                    <Input defaultValue={localWs.logoUrl || ""} placeholder="https://..." onChange={e => setLocalWs(p => ({ ...p, logoUrl: e.target.value }))} />
                   </div>
                   <div className="space-y-1.5">
                     <Label>Position</Label>
-                    <Select value={ws.logoPosition || "top-right"} onValueChange={val => updateWatermark.mutate({ ...ws, logoPosition: val })}>
+                    <Select value={localWs.logoPosition || "top-right"} onValueChange={val => setLocalWs(p => ({ ...p, logoPosition: val }))}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        {["top-left","top-right","bottom-left","bottom-right","center"].map(p => (
-                          <SelectItem key={p} value={p}>{p}</SelectItem>
+                        {["top-left","top-right","bottom-left","bottom-right","center"].map(pos => (
+                          <SelectItem key={pos} value={pos}>{pos}</SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label>Opacity: {Math.round((ws.logoOpacity ?? 0.8) * 100)}%</Label>
-                    <Slider
-                      value={[(ws.logoOpacity ?? 0.8) * 100]}
-                      min={10} max={100} step={5}
-                      onValueChange={([v]) => updateWatermark.mutate({ ...ws, logoOpacity: v / 100 })}
-                    />
+                    <Label>Opacity: {Math.round((localWs.logoOpacity ?? 0.8) * 100)}%</Label>
+                    <Slider value={[(localWs.logoOpacity ?? 0.8) * 100]} min={10} max={100} step={5}
+                      onValueChange={([v]) => setLocalWs(p => ({ ...p, logoOpacity: v / 100 }))} />
                   </div>
                 </div>
               )}
+              <SaveBar dirty={JSON.stringify(localWs) !== JSON.stringify(ws)} onSave={() => updateWatermark.mutate(localWs)} isPending={updateWatermark.isPending} />
             </CardContent>
           </Card>
 
@@ -526,29 +604,29 @@ export default function VideoDetailPage() {
             <CardHeader><CardTitle className="text-base">Scrolling Ticker</CardTitle></CardHeader>
             <CardContent>
               <SettingRow label="Enable Ticker" description="Show a scrolling text banner">
-                <Switch checked={!!ws.tickerEnabled} onCheckedChange={val => updateWatermark.mutate({ ...ws, tickerEnabled: val })} />
+                <Switch checked={!!localWs.tickerEnabled} onCheckedChange={val => setLocalWs(p => ({ ...p, tickerEnabled: val }))} />
               </SettingRow>
-              {ws.tickerEnabled && (
+              {localWs.tickerEnabled && (
                 <div className="mt-4 space-y-4">
                   <div className="space-y-1.5">
                     <Label>Ticker Text</Label>
-                    <Input
-                      defaultValue={ws.tickerText || ""}
-                      placeholder="Use {DOMAIN} {VIDEO_ID} {SESSION_CODE} {TIME}"
-                      onBlur={e => updateWatermark.mutate({ ...ws, tickerText: e.target.value })}
-                    />
+                    <Input defaultValue={localWs.tickerText || ""} placeholder="Use {DOMAIN} {VIDEO_ID} {SESSION_CODE} {TIME}"
+                      onChange={e => setLocalWs(p => ({ ...p, tickerText: e.target.value }))} />
                     <p className="text-xs text-muted-foreground">Variables: {"{DOMAIN}"} {"{VIDEO_ID}"} {"{SESSION_CODE}"} {"{TIME}"}</p>
                   </div>
                   <div className="space-y-2">
-                    <Label>Speed: {ws.tickerSpeed || 50}px/s</Label>
-                    <Slider value={[ws.tickerSpeed || 50]} min={10} max={200} step={10} onValueChange={([v]) => updateWatermark.mutate({ ...ws, tickerSpeed: v })} />
+                    <Label>Speed: {localWs.tickerSpeed || 50}px/s</Label>
+                    <Slider value={[localWs.tickerSpeed || 50]} min={10} max={200} step={10}
+                      onValueChange={([v]) => setLocalWs(p => ({ ...p, tickerSpeed: v }))} />
                   </div>
                   <div className="space-y-2">
-                    <Label>Opacity: {Math.round((ws.tickerOpacity ?? 0.7) * 100)}%</Label>
-                    <Slider value={[(ws.tickerOpacity ?? 0.7) * 100]} min={10} max={100} step={5} onValueChange={([v]) => updateWatermark.mutate({ ...ws, tickerOpacity: v / 100 })} />
+                    <Label>Opacity: {Math.round((localWs.tickerOpacity ?? 0.7) * 100)}%</Label>
+                    <Slider value={[(localWs.tickerOpacity ?? 0.7) * 100]} min={10} max={100} step={5}
+                      onValueChange={([v]) => setLocalWs(p => ({ ...p, tickerOpacity: v / 100 }))} />
                   </div>
                 </div>
               )}
+              <SaveBar dirty={JSON.stringify(localWs) !== JSON.stringify(ws)} onSave={() => updateWatermark.mutate(localWs)} isPending={updateWatermark.isPending} />
             </CardContent>
           </Card>
 
@@ -556,17 +634,18 @@ export default function VideoDetailPage() {
             <CardHeader><CardTitle className="text-base">Pop-up Watermark</CardTitle></CardHeader>
             <CardContent>
               <SettingRow label="Enable Pop Watermark" description="Show periodic pop-up text overlays">
-                <Switch checked={!!ws.popEnabled} onCheckedChange={val => updateWatermark.mutate({ ...ws, popEnabled: val })} />
+                <Switch checked={!!localWs.popEnabled} onCheckedChange={val => setLocalWs(p => ({ ...p, popEnabled: val }))} />
               </SettingRow>
-              {ws.popEnabled && (
+              {localWs.popEnabled && (
                 <div className="mt-4 space-y-4">
                   <div className="space-y-1.5">
                     <Label>Pop Text</Label>
-                    <Input defaultValue={ws.popText || "{DOMAIN}"} placeholder="{DOMAIN}" onBlur={e => updateWatermark.mutate({ ...ws, popText: e.target.value })} />
+                    <Input defaultValue={localWs.popText || "{DOMAIN}"} placeholder="{DOMAIN}"
+                      onChange={e => setLocalWs(p => ({ ...p, popText: e.target.value }))} />
                   </div>
                   <div className="space-y-1.5">
                     <Label>Position Mode</Label>
-                    <Select value={ws.popMode || "random"} onValueChange={val => updateWatermark.mutate({ ...ws, popMode: val })}>
+                    <Select value={localWs.popMode || "random"} onValueChange={val => setLocalWs(p => ({ ...p, popMode: val }))}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="random">Random (corners + center)</SelectItem>
@@ -578,19 +657,23 @@ export default function VideoDetailPage() {
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1.5">
                       <Label>Interval (seconds)</Label>
-                      <Input type="number" min={5} defaultValue={ws.popInterval || 30} onBlur={e => updateWatermark.mutate({ ...ws, popInterval: parseInt(e.target.value) })} />
+                      <Input type="number" min={5} defaultValue={localWs.popInterval || 30}
+                        onChange={e => setLocalWs(p => ({ ...p, popInterval: parseInt(e.target.value) || 30 }))} />
                     </div>
                     <div className="space-y-1.5">
                       <Label>Duration (seconds)</Label>
-                      <Input type="number" min={1} defaultValue={ws.popDuration || 3} onBlur={e => updateWatermark.mutate({ ...ws, popDuration: parseInt(e.target.value) })} />
+                      <Input type="number" min={1} defaultValue={localWs.popDuration || 3}
+                        onChange={e => setLocalWs(p => ({ ...p, popDuration: parseInt(e.target.value) || 3 }))} />
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <Label>Opacity: {Math.round((ws.popOpacity ?? 0.8) * 100)}%</Label>
-                    <Slider value={[(ws.popOpacity ?? 0.8) * 100]} min={10} max={100} step={5} onValueChange={([v]) => updateWatermark.mutate({ ...ws, popOpacity: v / 100 })} />
+                    <Label>Opacity: {Math.round((localWs.popOpacity ?? 0.8) * 100)}%</Label>
+                    <Slider value={[(localWs.popOpacity ?? 0.8) * 100]} min={10} max={100} step={5}
+                      onValueChange={([v]) => setLocalWs(p => ({ ...p, popOpacity: v / 100 }))} />
                   </div>
                 </div>
               )}
+              <SaveBar dirty={JSON.stringify(localWs) !== JSON.stringify(ws)} onSave={() => updateWatermark.mutate(localWs)} isPending={updateWatermark.isPending} />
             </CardContent>
           </Card>
         </TabsContent>
@@ -608,23 +691,24 @@ export default function VideoDetailPage() {
                 { key: "rateLimitEnabled", label: "Rate Limiting", desc: "Limit requests per token/IP" },
               ].map(s => (
                 <SettingRow key={s.key} label={s.label} description={s.desc}>
-                  <Switch checked={!!ss[s.key]} onCheckedChange={val => updateSecurity.mutate({ ...ss, [s.key]: val })} data-testid={`switch-${s.key}`} />
+                  <Switch checked={!!localSs[s.key]} onCheckedChange={val => setLocalSs(p => ({ ...p, [s.key]: val }))} data-testid={`switch-${s.key}`} />
                 </SettingRow>
               ))}
               <div className="mt-4 grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <Label>Signed URL TTL (seconds)</Label>
-                  <Input type="number" min={10} defaultValue={ss.signedUrlTtl || 120} onBlur={e => updateSecurity.mutate({ ...ss, signedUrlTtl: parseInt(e.target.value) })} />
+                  <Input type="number" min={10} defaultValue={localSs.signedUrlTtl || 120} onChange={e => setLocalSs(p => ({ ...p, signedUrlTtl: parseInt(e.target.value) || 120 }))} />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Token TTL (seconds)</Label>
-                  <Input type="number" min={60} defaultValue={ss.tokenTtl || 86400} onBlur={e => updateSecurity.mutate({ ...ss, tokenTtl: parseInt(e.target.value) })} />
+                  <Input type="number" min={60} defaultValue={localSs.tokenTtl || 86400} onChange={e => setLocalSs(p => ({ ...p, tokenTtl: parseInt(e.target.value) || 86400 }))} />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Concurrent Session Limit</Label>
-                  <Input type="number" min={1} defaultValue={ss.concurrentLimit || 5} onBlur={e => updateSecurity.mutate({ ...ss, concurrentLimit: parseInt(e.target.value) })} />
+                  <Input type="number" min={1} defaultValue={localSs.concurrentLimit || 5} onChange={e => setLocalSs(p => ({ ...p, concurrentLimit: parseInt(e.target.value) || 5 }))} />
                 </div>
               </div>
+              <SaveBar dirty={JSON.stringify(localSs) !== JSON.stringify(ss)} onSave={() => updateSecurity.mutate(localSs)} isPending={updateSecurity.isPending} />
             </CardContent>
           </Card>
 
@@ -635,9 +719,9 @@ export default function VideoDetailPage() {
             </CardHeader>
             <CardContent>
               <SettingRow label="Enable Domain Whitelist" description="Block playback from domains not in the list">
-                <Switch checked={!!ss.domainWhitelistEnabled} onCheckedChange={val => updateSecurity.mutate({ ...ss, domainWhitelistEnabled: val })} />
+                <Switch checked={!!localSs.domainWhitelistEnabled} onCheckedChange={val => setLocalSs(p => ({ ...p, domainWhitelistEnabled: val }))} />
               </SettingRow>
-              {ss.domainWhitelistEnabled && (
+              {localSs.domainWhitelistEnabled && (
                 <div className="mt-4 space-y-3">
                   <div className="flex gap-2">
                     <Input
@@ -646,41 +730,30 @@ export default function VideoDetailPage() {
                       placeholder="example.com"
                       onKeyDown={e => {
                         if (e.key === "Enter" && domainInput.trim()) {
-                          const domains = [...(ss.allowedDomains || []), domainInput.trim()];
-                          updateSecurity.mutate({ ...ss, allowedDomains: domains });
+                          setLocalSs(p => ({ ...p, allowedDomains: [...(p.allowedDomains || []), domainInput.trim()] }));
                           setDomainInput("");
                         }
                       }}
                     />
-                    <Button
-                      variant="outline"
-                      onClick={() => {
-                        if (domainInput.trim()) {
-                          const domains = [...(ss.allowedDomains || []), domainInput.trim()];
-                          updateSecurity.mutate({ ...ss, allowedDomains: domains });
-                          setDomainInput("");
-                        }
-                      }}
-                    >
-                      Add
-                    </Button>
+                    <Button variant="outline" onClick={() => {
+                      if (domainInput.trim()) {
+                        setLocalSs(p => ({ ...p, allowedDomains: [...(p.allowedDomains || []), domainInput.trim()] }));
+                        setDomainInput("");
+                      }
+                    }}>Add</Button>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {(ss.allowedDomains || []).map((domain: string) => (
+                    {(localSs.allowedDomains || []).map((domain: string) => (
                       <Badge key={domain} variant="secondary" className="gap-1.5">
                         {domain}
-                        <button
-                          onClick={() => updateSecurity.mutate({ ...ss, allowedDomains: ss.allowedDomains.filter((d: string) => d !== domain) })}
-                          className="hover:text-destructive"
-                        >
-                          ×
-                        </button>
+                        <button onClick={() => setLocalSs(p => ({ ...p, allowedDomains: p.allowedDomains.filter((d: string) => d !== domain) }))} className="hover:text-destructive">×</button>
                       </Badge>
                     ))}
-                    {!(ss.allowedDomains?.length) && <p className="text-sm text-muted-foreground">No domains added yet</p>}
+                    {!(localSs.allowedDomains?.length) && <p className="text-sm text-muted-foreground">No domains added yet</p>}
                   </div>
                 </div>
               )}
+              <SaveBar dirty={JSON.stringify(localSs) !== JSON.stringify(ss)} onSave={() => updateSecurity.mutate(localSs)} isPending={updateSecurity.isPending} />
             </CardContent>
           </Card>
         </TabsContent>
@@ -693,43 +766,9 @@ export default function VideoDetailPage() {
                 <CardTitle className="text-base">Embed Codes</CardTitle>
                 <CardDescription>Use these in external websites</CardDescription>
               </div>
-              <Dialog open={tokenDialogOpen} onOpenChange={setTokenDialogOpen}>
-                <DialogTrigger asChild>
-                  <Button size="sm" data-testid="button-create-token">
-                    <Plus className="h-3.5 w-3.5 mr-1" />New Token
-                  </Button>
-                </DialogTrigger>
-                <DialogContent>
-                  <DialogHeader><DialogTitle>Create Embed Token</DialogTitle></DialogHeader>
-                  <div className="space-y-4 py-2">
-                    <div className="space-y-1.5">
-                      <Label>Label</Label>
-                      <Input value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder="Website Name" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Allowed Domain (optional)</Label>
-                      <Input value={tokenDomain} onChange={e => setTokenDomain(e.target.value)} placeholder="example.com" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Expires In (hours)</Label>
-                      <Select value={tokenTtl} onValueChange={setTokenTtl}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="1">1 hour</SelectItem>
-                          <SelectItem value="24">24 hours</SelectItem>
-                          <SelectItem value="168">7 days</SelectItem>
-                          <SelectItem value="720">30 days</SelectItem>
-                          <SelectItem value="8760">1 year</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  <DialogFooter>
-                    <Button variant="outline" onClick={() => setTokenDialogOpen(false)}>Cancel</Button>
-                    <Button onClick={() => createToken.mutate()} disabled={createToken.isPending}>Create Token</Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
+              <Button size="sm" onClick={() => setTokenDialogOpen(true)} data-testid="button-create-token">
+                <Plus className="h-3.5 w-3.5 mr-1" />New Token
+              </Button>
             </CardHeader>
             <CardContent className="space-y-5">
               {!firstToken && (
@@ -867,5 +906,42 @@ export default function VideoDetailPage() {
         </TabsContent>
       </Tabs>
     </div>
+
+    {/* Token creation dialog rendered at top-level so it works from any tab */}
+    <Dialog open={tokenDialogOpen} onOpenChange={setTokenDialogOpen}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Create Embed Token</DialogTitle></DialogHeader>
+        <div className="space-y-4 py-2">
+          <div className="space-y-1.5">
+            <Label>Label</Label>
+            <Input value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder="Website Name" data-testid="input-token-label" />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Allowed Domain (optional)</Label>
+            <Input value={tokenDomain} onChange={e => setTokenDomain(e.target.value)} placeholder="example.com" data-testid="input-token-domain" />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Expires In (hours)</Label>
+            <Select value={tokenTtl} onValueChange={setTokenTtl}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="1">1 hour</SelectItem>
+                <SelectItem value="24">24 hours</SelectItem>
+                <SelectItem value="168">7 days</SelectItem>
+                <SelectItem value="720">30 days</SelectItem>
+                <SelectItem value="8760">1 year</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setTokenDialogOpen(false)}>Cancel</Button>
+          <Button onClick={() => createToken.mutate()} disabled={createToken.isPending} data-testid="button-confirm-create-token">
+            {createToken.isPending ? "Creating…" : "Create Token"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }

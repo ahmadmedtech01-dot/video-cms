@@ -31,6 +31,23 @@ interface PlayerSettings {
   endTime?: number;
 }
 
+function toEmbedUrl(sourceType: string, url: string): string {
+  try {
+    if (sourceType === "youtube") {
+      const parsed = new URL(url);
+      let id = parsed.searchParams.get("v");
+      if (!id && parsed.hostname === "youtu.be") id = parsed.pathname.slice(1).split("?")[0];
+      if (id) return `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1`;
+    }
+    if (sourceType === "vimeo") {
+      const parsed = new URL(url);
+      const m = parsed.pathname.match(/\/(\d+)/);
+      if (m) return `https://player.vimeo.com/video/${m[1]}?badge=0&autopause=0&player_id=0`;
+    }
+  } catch {}
+  return url;
+}
+
 const POSITION_CLASSES: Record<string, string> = {
   "top-left": "top-3 left-3",
   "top-right": "top-3 right-3",
@@ -347,9 +364,9 @@ export default function EmbedPlayerPage() {
       {/* External source (YouTube/Vimeo/Drive) */}
       {sourceType !== "s3" && sourceType !== "local" && externalUrl ? (
         <iframe
-          src={externalUrl}
+          src={toEmbedUrl(sourceType, externalUrl)}
           className="w-full h-full"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
           allowFullScreen
         />
       ) : (
