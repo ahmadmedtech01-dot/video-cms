@@ -626,6 +626,82 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.post("/api/videos/:id/retranscode", requireAuth, async (req, res) => {
+    try {
+      const video = await storage.getVideoById(req.params.id);
+      if (!video) return res.status(404).json({ message: "Video not found" });
+
+      if (video.status === "processing") {
+        return res.status(400).json({ message: "Video is already processing" });
+      }
+
+      const rawKey = video.rawS3Key;
+      const sourceUrl = video.sourceUrl;
+      const sourceType = video.sourceType;
+
+      if (rawKey) {
+        const connId = (video as any).storageConnectionId as string | null;
+        const conn = connId
+          ? await storage.getStorageConnectionById(connId)
+          : await storage.getActiveStorageConnection();
+
+        if (!conn) return res.status(400).json({ message: "No storage connection found" });
+
+        const cfg = conn.config as any;
+        const b2 = makeB2Client({ endpoint: cfg.endpoint });
+        const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+
+        await storage.updateVideo(video.id, { status: "processing", lastError: null } as any);
+        res.json({ ok: true, message: "Re-transcoding started with AES-128 encryption. This may take a few minutes." });
+
+        (async () => {
+          try {
+            const resp = await b2.send(new GetObjectCommand({ Bucket: cfg.bucket, Key: rawKey }));
+            const tmpPath = path.join(os.tmpdir(), `retranscode-${video.id}.mp4`);
+            const bodyStream = resp.Body as any;
+            const ws = fs.createWriteStream(tmpPath);
+            await new Promise<void>((resolve, reject) => {
+              bodyStream.pipe(ws);
+              ws.on("finish", resolve);
+              ws.on("error", reject);
+            });
+            const quals = video.qualities?.length ? video.qualities : [720, 480, 360];
+            await transcodeAndStoreHls(video.id, tmpPath, quals);
+            try { fs.unlinkSync(tmpPath); } catch {}
+          } catch (e: any) {
+            log(`Re-transcode failed for ${video.id}: ${e.message}`);
+            await storage.updateVideo(video.id, { status: "error", lastError: `Re-transcode failed: ${e.message}` } as any);
+          }
+        })();
+        await storage.createAuditLog({ action: "video_retranscode_started", meta: { videoId: video.id }, ip: req.ip });
+        return;
+      }
+
+      if (sourceType === "vimeo" || sourceType === "vimeo_ingest") {
+        if (!sourceUrl) return res.status(400).json({ message: "No source URL for re-transcode" });
+        await storage.updateVideo(video.id, { status: "processing", lastError: null } as any);
+        ingestVimeoVideo(video.id, sourceUrl).catch(async (e: Error) => {
+          await storage.updateVideo(video.id, { status: "error", lastError: e.message } as any);
+        });
+        await storage.createAuditLog({ action: "video_retranscode_started", meta: { videoId: video.id, sourceType }, ip: req.ip });
+        return res.json({ ok: true, message: "Re-transcoding (Vimeo) started with AES-128 encryption." });
+      }
+
+      if (sourceType === "direct_url" && sourceUrl && !/\.m3u8/i.test(sourceUrl)) {
+        await storage.updateVideo(video.id, { status: "processing", lastError: null } as any);
+        ingestDirectMp4(video.id, sourceUrl).catch(async (e: Error) => {
+          await storage.updateVideo(video.id, { status: "error", lastError: e.message } as any);
+        });
+        await storage.createAuditLog({ action: "video_retranscode_started", meta: { videoId: video.id, sourceType }, ip: req.ip });
+        return res.json({ ok: true, message: "Re-transcoding (direct URL) started with AES-128 encryption." });
+      }
+
+      return res.status(400).json({ message: "Cannot re-transcode this video. No raw file or supported source available." });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.post("/api/videos/:id/toggle-availability", requireAuth, async (req, res) => {
     const v = await storage.getVideoById(req.params.id);
     if (!v) return res.status(404).json({ message: "Not found" });

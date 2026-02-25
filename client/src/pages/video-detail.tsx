@@ -373,6 +373,22 @@ export default function VideoDetailPage() {
     },
   });
 
+  const retranscodeMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/videos/${id}/retranscode`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to start re-transcode");
+      return data;
+    },
+    onSuccess: (data) => {
+      toast({ title: "Re-transcode started", description: data.message });
+      qc.invalidateQueries({ queryKey: ["/api/videos", id] });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Re-transcode failed", description: e.message, variant: "destructive" });
+    },
+  });
+
   // Must be before early returns — hooks cannot be called conditionally
   useEffect(() => {
     if (videoData?.playerSettings) setLocalPs(videoData.playerSettings);
@@ -623,6 +639,29 @@ export default function VideoDetailPage() {
                 >
                   <ExternalLink className="h-4 w-4" />Open player in new tab
                 </a>
+              </CardContent>
+            </Card>
+          )}
+
+          {derivedStatus === "ready" && !(video as any).encryptionKid && (
+            <Card className="border border-amber-500/30 bg-amber-500/5">
+              <CardContent className="pt-5">
+                <div className="flex items-start gap-3">
+                  <Shield className="h-5 w-5 text-amber-600 mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-foreground">AES-128 Encryption Not Applied</p>
+                    <p className="text-xs text-muted-foreground mt-1">This video was transcoded before encryption was enabled. Re-transcode to apply AES-128 segment encryption for maximum protection.</p>
+                    <Button
+                      size="sm"
+                      className="mt-3"
+                      disabled={retranscodeMutation.isPending}
+                      onClick={() => retranscodeMutation.mutate()}
+                      data-testid="button-retranscode"
+                    >
+                      {retranscodeMutation.isPending ? <><RefreshCw className="h-3 w-3 mr-1 animate-spin" />Re-transcoding...</> : <><Lock className="h-3 w-3 mr-1" />Re-transcode with AES-128</>}
+                    </Button>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           )}
