@@ -95,14 +95,23 @@ async function ingestDirectMp4(videoId: string, url: string): Promise<void> {
   }
 }
 
+function extractVimeoId(input: string): string | null {
+  // 1) Full iframe embed HTML: src="https://player.vimeo.com/video/1168001442?..."
+  const iframeMatch = input.match(/player\.vimeo\.com\/video\/(\d+)/i);
+  if (iframeMatch) return iframeMatch[1];
+  // 2) Standard Vimeo URL: https://vimeo.com/1168001442 or https://vimeo.com/video/1168001442
+  const urlMatch = input.match(/vimeo\.com\/(?:video\/)?(\d+)/i);
+  if (urlMatch) return urlMatch[1];
+  return null;
+}
+
 async function ingestVimeoVideo(videoId: string, vimeoUrl: string): Promise<void> {
   const vimeoToken = process.env.VIMEO_ACCESS_TOKEN || (await storage.getSetting("vimeo_access_token")) || "";
   if (!vimeoToken) {
     throw new Error("Vimeo access token not configured. Set VIMEO_ACCESS_TOKEN in environment variables or add vimeo_access_token in System Settings.");
   }
-  const m = vimeoUrl.match(/vimeo\.com\/(?:video\/)?(\d+)/);
-  if (!m) throw new Error("Could not parse Vimeo video ID from URL");
-  const vimeoVideoId = m[1];
+  const vimeoVideoId = extractVimeoId(vimeoUrl);
+  if (!vimeoVideoId) throw new Error("Could not parse Vimeo video ID from input");
 
   log(`Calling Vimeo API for video ID ${vimeoVideoId}...`);
   const apiRes = await fetch(`https://api.vimeo.com/videos/${vimeoVideoId}`, {
@@ -385,10 +394,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { sourceUrl, title, description, author, tags } = req.body;
       if (!sourceUrl?.trim()) return res.status(400).json({ message: "sourceUrl is required" });
 
-      const url = sourceUrl.trim();
-      const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(url);
-      const isVimeo = /vimeo\.com/i.test(url);
-      const isM3u8 = /\.m3u8(\?|$)/i.test(url);
+      const rawInput = sourceUrl.trim();
+
+      // Check Vimeo first (handles both iframe HTML and URLs)
+      const vimeoId = extractVimeoId(rawInput);
+      const isVimeo = !!vimeoId;
+      // Normalize to canonical vimeo URL if matched
+      const url = isVimeo ? `https://vimeo.com/${vimeoId}` : rawInput;
+
+      const isYouTube = !isVimeo && /(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/i.test(rawInput);
+      const isM3u8 = !isVimeo && /\.m3u8(\?|$)/i.test(url);
 
       let sourceType: string;
       let initialStatus: string;

@@ -475,11 +475,38 @@ export default function VideoDetailPage() {
                   <Input defaultValue={video.author} onBlur={e => updateVideo.mutate({ author: e.target.value })} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Source Type</Label>
-                  <Input value={video.sourceType} readOnly className="opacity-60" />
+                  <Label>Source</Label>
+                  <div className="flex items-center h-9">
+                    {video.sourceType === "vimeo_ingest" ? (
+                      <Badge variant="secondary" className="bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/20">
+                        Vimeo (Imported)
+                      </Badge>
+                    ) : video.sourceType === "upload" ? (
+                      <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/20">
+                        Direct Upload
+                      </Badge>
+                    ) : video.sourceType === "direct_url" ? (
+                      <Badge variant="secondary" className="bg-purple-500/10 text-purple-700 dark:text-purple-400 border-purple-500/20">
+                        Direct URL / HLS
+                      </Badge>
+                    ) : video.sourceType === "youtube_blocked" ? (
+                      <Badge variant="destructive" className="bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/20">
+                        YouTube (Blocked)
+                      </Badge>
+                    ) : (
+                      <span className="text-sm text-muted-foreground capitalize">{video.sourceType}</span>
+                    )}
+                  </div>
                 </div>
               </div>
-              {video.sourceUrl && (
+              {video.sourceType === "vimeo_ingest" && video.sourceUrl && (
+                <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-xs">
+                  <span className="text-muted-foreground">Vimeo source: </span>
+                  <span className="font-mono text-blue-700 dark:text-blue-400">{video.sourceUrl}</span>
+                  <span className="ml-2 text-muted-foreground">(reference only — video plays from our HLS)</span>
+                </div>
+              )}
+              {video.sourceType !== "vimeo_ingest" && video.sourceUrl && (
                 <div className="space-y-1.5">
                   <Label>Source URL</Label>
                   <Input defaultValue={video.sourceUrl} onBlur={e => updateVideo.mutate({ sourceUrl: e.target.value })} />
@@ -499,7 +526,14 @@ export default function VideoDetailPage() {
                 {[
                   { label: "Public ID", value: video.publicId },
                   { label: "Status", value: video.status },
-                  { label: "Source Type", value: video.sourceType },
+                  {
+                    label: "Source Type",
+                    value: video.sourceType === "vimeo_ingest" ? "Vimeo (Imported)"
+                      : video.sourceType === "upload" ? "Direct Upload"
+                      : video.sourceType === "direct_url" ? "Direct URL / HLS"
+                      : video.sourceType === "youtube_blocked" ? "YouTube (Blocked)"
+                      : video.sourceType
+                  },
                   { label: "Available", value: video.available ? "Yes" : "No" },
                   { label: "Created", value: format(new Date(video.createdAt), "PPP") },
                   { label: "Qualities", value: (video.qualities || []).map((q: number) => `${q}p`).join(", ") || "—" },

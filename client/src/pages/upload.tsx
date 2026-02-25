@@ -23,18 +23,33 @@ const QUALITY_OPTIONS = [
   { value: 1080, label: "1080p (Full HD)" },
 ];
 
-function detectUrlType(url: string): { type: "youtube" | "vimeo" | "m3u8" | "mp4" | "direct" | ""; label: string; description: string; blocked: boolean } {
-  if (!url.trim()) return { type: "", label: "", description: "", blocked: false };
-  if (/(?:youtube\.com|youtu\.be)/i.test(url)) {
-    return { type: "youtube", label: "YouTube — Not Supported", description: "YouTube links cannot be played in our custom player. Please upload the video file or provide a direct HLS/MP4 URL you own.", blocked: true };
+function extractVimeoIdFE(input: string): string | null {
+  const iframeMatch = input.match(/player\.vimeo\.com\/video\/(\d+)/i);
+  if (iframeMatch) return iframeMatch[1];
+  const urlMatch = input.match(/vimeo\.com\/(?:video\/)?(\d+)/i);
+  if (urlMatch) return urlMatch[1];
+  return null;
+}
+
+function detectUrlType(input: string): { type: "youtube" | "vimeo" | "m3u8" | "mp4" | "direct" | ""; label: string; description: string; blocked: boolean } {
+  const raw = input.trim();
+  if (!raw) return { type: "", label: "", description: "", blocked: false };
+
+  // Vimeo iframe HTML or player.vimeo.com URL
+  const vimeoId = extractVimeoIdFE(raw);
+  if (vimeoId) {
+    return { type: "vimeo", label: "Vimeo — Will Be Ingested", description: "We will import this video into your CMS using the Vimeo API and convert it to our secure HLS player. The Vimeo player iframe will NOT be used. Requires VIMEO_ACCESS_TOKEN and a Vimeo plan that allows file downloads.", blocked: false };
   }
-  if (/vimeo\.com/i.test(url)) {
-    return { type: "vimeo", label: "Vimeo — Ingest Required", description: "We will download and convert this video using the Vimeo API (requires VIMEO_ACCESS_TOKEN). Your Vimeo plan must allow file downloads. This may take several minutes.", blocked: false };
+
+  // YouTube (URL or iframe)
+  if (/(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/i.test(raw)) {
+    return { type: "youtube", label: "YouTube — Not Supported", description: "YouTube links and embeds cannot be played in our custom player. Please upload the video file or provide a direct HLS/MP4 URL you own.", blocked: true };
   }
-  if (/\.m3u8(\?|$)/i.test(url)) {
+
+  if (/\.m3u8(\?|$)/i.test(raw)) {
     return { type: "m3u8", label: "Direct HLS Stream", description: "This .m3u8 URL will be used as-is in our player. It will be ready immediately.", blocked: false };
   }
-  if (/\.mp4(\?|$)/i.test(url)) {
+  if (/\.mp4(\?|$)/i.test(raw)) {
     return { type: "mp4", label: "Direct MP4 — Will Transcode", description: "We will download this MP4 and convert it to HLS. This may take a few minutes.", blocked: false };
   }
   return { type: "direct", label: "Media URL — Will Transcode", description: "We will attempt to download and transcode this URL to HLS.", blocked: false };
@@ -313,13 +328,18 @@ export default function UploadPage() {
 
             <TabsContent value="import" className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Video URL</Label>
-                <Input
+                <Label>Video URL or Vimeo Embed Code</Label>
+                <Textarea
                   value={sourceUrl}
                   onChange={e => setSourceUrl(e.target.value)}
-                  placeholder="https://vimeo.com/123456, https://cdn.example.com/video.mp4, or https://cdn.example.com/master.m3u8"
+                  placeholder={`Paste a Vimeo URL, Vimeo embed code (<iframe ...>), direct .mp4 URL, or .m3u8 playlist URL`}
+                  rows={3}
+                  className="font-mono text-xs"
                   data-testid="input-source-url"
                 />
+                <p className="text-xs text-muted-foreground">
+                  Note: Vimeo embed code will NOT play in Vimeo's player. We will import the video into your CMS and play it via our secure custom player with your watermark and security settings applied.
+                </p>
               </div>
 
               {/* URL type detection feedback */}
@@ -347,8 +367,8 @@ export default function UploadPage() {
               {!urlInfo.type && (
                 <div className="rounded-lg border border-border bg-muted/40 p-3">
                   <p className="text-xs text-muted-foreground">
-                    Supported: Vimeo links (requires Vimeo Pro API token), direct .mp4 or .m3u8 URLs.
-                    YouTube links are not supported — please upload the file directly.
+                    Supported: Vimeo URLs or embed code (requires Vimeo API access token + plan with file downloads), direct .mp4 or .m3u8 URLs.
+                    YouTube is not supported — please upload the file directly.
                   </p>
                 </div>
               )}
