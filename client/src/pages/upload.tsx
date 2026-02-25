@@ -51,10 +51,12 @@ export default function UploadPage() {
   const [dragOver, setDragOver] = useState(false);
 
   const createVideoMutation = useMutation({
-    mutationFn: (data: any) => apiRequest("POST", "/api/videos", data),
-    onSuccess: async (data: any) => {
+    mutationFn: async (data: any) => {
+      const res = await apiRequest("POST", "/api/videos", data);
+      return res.json();
+    },
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/videos"] });
-      return data;
     },
   });
 
