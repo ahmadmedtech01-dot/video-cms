@@ -42,6 +42,8 @@ export const videos = pgTable("videos", {
   lastErrorCode: text("last_error_code"),
   lastErrorHints: jsonb("last_error_hints").default(sql`'[]'::jsonb`),
   storageConnectionId: uuid("storage_connection_id"),
+  encryptionKid: text("encryption_kid"),
+  encryptionKeyPath: text("encryption_key_path"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

@@ -12,6 +12,7 @@ import { storage } from "./storage";
 import { spawn } from "child_process";
 import os from "os";
 import { vimeoFetchVideo, vimeoExtractFileLinks, vimeoDiagnoseNoFileAccess } from "./vimeo";
+import crypto from "crypto";
 import { makeB2Client, b2PresignGetObject, b2UploadFile } from "./b2";
 import { createSession, getSession, revokeSession, verifySignedPath, trackRequest, trackPlaylistFetch, acquireSegment, releaseSegment, trackKeyHit, buildSignedProxyUrl, signPath, computeDeviceHash, updateProgress, validateSegmentWindow, parsePlaylist, getWindowRange } from "./video-session";
 import type { PlaylistCache } from "./video-session";
@@ -112,7 +113,10 @@ async function uploadHlsDir(localDir: string, prefix: string, activeConn: Awaite
     return files;
   }
   const files = walkDir(localDir);
+  const skipFiles = new Set(["enc.key", "key_info.txt"]);
   for (const file of files) {
+    const basename = path.basename(file);
+    if (skipFiles.has(basename)) continue;
     const relPath = path.relative(localDir, file).replace(/\\/g, "/");
     const key = `${prefix}${relPath}`;
     const contentType = file.endsWith(".m3u8") ? "application/vnd.apple.mpegurl" : "video/MP2T";
@@ -122,18 +126,34 @@ async function uploadHlsDir(localDir: string, prefix: string, activeConn: Awaite
 
 async function transcodeAndStoreHls(videoId: string, inputPath: string, qualities: number[]): Promise<void> {
   const hlsOutputDir = path.join(os.tmpdir(), "vcms-hls", videoId);
-  await runFfmpegHls(inputPath, hlsOutputDir, qualities);
 
-  // Try active storage connection (B2 or legacy S3)
+  const enc = generateEncryptionKey();
+  const keyFilePath = path.join(hlsOutputDir, "enc.key");
+  const keyInfoPath = path.join(hlsOutputDir, "key_info.txt");
+  if (!fs.existsSync(hlsOutputDir)) fs.mkdirSync(hlsOutputDir, { recursive: true });
+  fs.writeFileSync(keyFilePath, enc.keyBytes);
+  createKeyInfoFile("enc.key", keyFilePath, enc.iv, keyInfoPath);
+
+  await runFfmpegHls(inputPath, hlsOutputDir, qualities, { keyInfoPath });
+
   const activeConn = await storage.getActiveStorageConnection();
 
   if (activeConn?.provider === "backblaze_b2") {
     const cfg = activeConn.config as any;
     const hlsPrefix = `${cfg.hlsPrefix || "hls/"}${videoId}/`;
+    const keyBucketPath = `${hlsPrefix}enc.key`;
+    await b2UploadFile(cfg.bucket, keyBucketPath, enc.keyBytes, "application/octet-stream", cfg.endpoint);
     await uploadHlsDir(hlsOutputDir, hlsPrefix, activeConn);
-    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: hlsPrefix, storageConnectionId: activeConn.id, lastError: null } as any);
+    await storage.updateVideo(videoId, {
+      status: "ready",
+      hlsS3Prefix: hlsPrefix,
+      storageConnectionId: activeConn.id,
+      encryptionKid: enc.kid,
+      encryptionKeyPath: keyBucketPath,
+      lastError: null,
+    } as any);
     try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
-    log(`B2 HLS upload complete for video ${videoId}`);
+    log(`B2 HLS upload (AES-128 encrypted) complete for video ${videoId}`);
     return;
   }
 
@@ -142,16 +162,16 @@ async function transcodeAndStoreHls(videoId: string, inputPath: string, qualitie
   if (client && cfg.bucket) {
     const hlsPrefix = `${cfg.hlsPrefix}${videoId}/`;
     await uploadHlsToS3(hlsOutputDir, hlsPrefix);
-    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: hlsPrefix, lastError: null } as any);
+    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: hlsPrefix, encryptionKid: enc.kid, lastError: null } as any);
     try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
   } else {
     const localHlsDir = path.join(uploadDir, "hls", videoId);
     if (fs.existsSync(localHlsDir)) fs.rmSync(localHlsDir, { recursive: true });
     fs.cpSync(hlsOutputDir, localHlsDir, { recursive: true });
-    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: localHlsDir, lastError: null } as any);
+    await storage.updateVideo(videoId, { status: "ready", hlsS3Prefix: localHlsDir, encryptionKid: enc.kid, lastError: null } as any);
     try { fs.rmSync(hlsOutputDir, { recursive: true }); } catch {}
   }
-  log(`Ingest/transcode complete for video ${videoId}`);
+  log(`Ingest/transcode (AES-128 encrypted) complete for video ${videoId}`);
 }
 
 async function ingestDirectMp4(videoId: string, url: string): Promise<void> {
@@ -264,12 +284,12 @@ function verifyToken(token: string): any {
 async function runFfmpegHls(
   inputPath: string,
   outputDir: string,
-  qualities: number[]
+  qualities: number[],
+  encryption?: { keyInfoPath: string },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
-    // Build ffmpeg args for HLS
     const args: string[] = ["-i", inputPath, "-y"];
 
     const qualityMap: Record<number, { vf: string; b: string; ba: string; maxrate: string; bufsize: string }> = {
@@ -293,20 +313,24 @@ async function runFfmpegHls(
       );
     });
 
-    // Master playlist stream map
     const streamMap = selectedQualities.map((_, i) => `v:${i},a:${i}`).join(" ");
 
     args.push(
       `-var_stream_map`, streamMap,
       `-master_pl_name`, `master.m3u8`,
       `-f`, `hls`,
-      `-hls_time`, `6`,
+      `-hls_time`, `4`,
       `-hls_list_size`, `0`,
       `-hls_segment_filename`, path.join(outputDir, "v%v/seg_%03d.ts"),
-      path.join(outputDir, "v%v/index.m3u8")
     );
 
-    log(`Running ffmpeg for HLS...`);
+    if (encryption) {
+      args.push(`-hls_key_inf_file`, encryption.keyInfoPath);
+    }
+
+    args.push(path.join(outputDir, "v%v/index.m3u8"));
+
+    log(`Running ffmpeg for HLS${encryption ? " (AES-128 encrypted)" : ""}...`);
     const proc = spawn("ffmpeg", args);
     proc.stderr.on("data", (d) => process.stdout.write(d));
     proc.on("close", (code) => {
@@ -314,6 +338,23 @@ async function runFfmpegHls(
       else reject(new Error(`ffmpeg exited with code ${code}`));
     });
   });
+}
+
+function generateEncryptionKey(): { keyBytes: Buffer; keyHex: string; kid: string; iv: string } {
+  const keyBytes = crypto.randomBytes(16);
+  const keyHex = keyBytes.toString("hex");
+  const kid = crypto.randomBytes(8).toString("hex");
+  const iv = crypto.randomBytes(16).toString("hex");
+  return { keyBytes, keyHex, kid, iv };
+}
+
+function createKeyInfoFile(
+  keyUri: string,
+  keyFilePath: string,
+  iv: string,
+  outputPath: string,
+): void {
+  fs.writeFileSync(outputPath, `${keyUri}\n${keyFilePath}\n${iv}\n`);
 }
 
 // Upload HLS segments to S3
@@ -1101,13 +1142,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           `#EXT-X-MEDIA-SEQUENCE:${windowStart}`,
         ];
 
+        let lastKeyEmitted = "";
         for (let i = windowStart; i <= windowEnd && i < totalSegs; i++) {
           const seg = cached.segments[i];
 
-          if (seg.extinf.includes("#EXT-X-KEY")) {
+          if (seg.keyTag && seg.keyTag !== lastKeyEmitted) {
             const proxyBase = `/key/${publicId}`;
-            const signed = buildSignedProxyUrl(proxyBase, sid, `/key`, 3600);
-            lines.push(seg.extinf.replace(/URI="([^"]+)"/, () => `URI="${signed}"`));
+            const signed = buildSignedProxyUrl(proxyBase, sid, `/key`, 3600, dh);
+            const rewritten = seg.keyTag.replace(/URI="([^"]+)"/, () => `URI="${signed}"`);
+            lines.push(rewritten);
+            lastKeyEmitted = seg.keyTag;
           }
 
           lines.push(seg.extinf);
@@ -1245,9 +1289,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  // ── AES-128 Key Endpoint (future: when ffmpeg encryption is enabled) ──────────
   app.get("/key/:publicId", async (req: any, res: any) => {
-    const { sid, st, exp } = req.query as Record<string, string>;
+    const { sid, st, exp, dh } = req.query as Record<string, string>;
     if (!sid || !st || !exp) return res.status(401).json({ code: "PLAYBACK_DENIED", message: "Missing auth" });
 
     const session = getSession(sid);
@@ -1256,13 +1299,47 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Invalid key token" });
     }
 
+    if (session.deviceHash) {
+      const reqUa = req.headers["user-agent"] || "";
+      const reqDh = computeDeviceHash(reqUa);
+      if (reqDh !== session.deviceHash) {
+        return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Device mismatch" });
+      }
+    }
+
     const keyIp = (req.headers["x-forwarded-for"] as string || req.ip || "").split(",")[0].trim();
     const { abused: keyAbused, reason: keyReason } = trackKeyHit(sid, keyIp);
     if (keyAbused) return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Denied", signal: keyReason?.signal });
 
-    // When AES-128 encryption is enabled in ffmpeg, serve the key from secure store here.
-    // For now, return 204 to indicate not-yet-supported without breaking clients.
-    res.status(204).end();
+    try {
+      const publicId = req.params.publicId;
+      const video = await storage.getVideoByPublicId(publicId);
+      if (!video?.encryptionKeyPath) {
+        return res.status(404).json({ code: "PLAYBACK_DENIED", message: "No encryption key" });
+      }
+
+      const connId = (video as any).storageConnectionId as string | null;
+      const conn = connId
+        ? await storage.getStorageConnectionById(connId)
+        : await storage.getActiveStorageConnection();
+
+      if (!conn) return res.status(500).json({ message: "Storage not configured" });
+
+      const cfg = conn.config as any;
+      const b2 = makeB2Client({ endpoint: cfg.endpoint });
+      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+      const resp = await b2.send(new GetObjectCommand({ Bucket: cfg.bucket, Key: video.encryptionKeyPath }));
+      const bodyBytes = await resp.Body!.transformToByteArray();
+
+      res.setHeader("Content-Type", "application/octet-stream");
+      res.setHeader("Content-Length", bodyBytes.length);
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      return res.send(Buffer.from(bodyBytes));
+    } catch (e: any) {
+      log(`Key fetch error: ${e.message}`);
+      return res.status(500).json({ code: "PLAYBACK_DENIED", message: "Key fetch failed" });
+    }
   });
 
   // ── Create Video Playback Session (alternative entry for custom players) ─────

@@ -18,7 +18,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, Dialog
 import {
   ArrowLeft, Eye, EyeOff, ExternalLink, Copy, CheckCircle, RefreshCw,
   Key, Shield, Droplets, Settings2, BarChart3, ScrollText, Code2,
-  Plus, Trash2, AlertCircle, Video, Clock,
+  Plus, Trash2, AlertCircle, Video, Clock, Lock,
   Play, SkipBack, SkipForward, Volume2, Maximize, Sun, Gauge, Layers,
   RotateCcw, Zap,
 } from "lucide-react";
@@ -453,6 +453,11 @@ export default function VideoDetailPage() {
               <Badge variant={video.available ? "outline" : "destructive"} className="text-xs">
                 {video.available ? "Available" : "Hidden"}
               </Badge>
+              {(video as any).encryptionKid && (
+                <Badge variant="outline" className="text-xs bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30" data-testid="badge-encryption">
+                  <Lock className="h-3 w-3 mr-1" />AES-128
+                </Badge>
+              )}
               <span className="text-xs text-muted-foreground">{video.publicId}</span>
             </div>
           </div>

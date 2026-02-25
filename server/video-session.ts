@@ -30,6 +30,7 @@ export interface AbuseReason {
 export interface ParsedSegment {
   extinf: string;
   uri: string;
+  keyTag?: string;
 }
 
 export interface PlaylistCache {
@@ -283,6 +284,7 @@ export function parsePlaylist(playlistText: string): PlaylistCache {
   let targetDuration = 4;
   let inSegments = false;
   let pendingExtinf = "";
+  let currentKeyTag = "";
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -292,6 +294,12 @@ export function parsePlaylist(playlistText: string): PlaylistCache {
       targetDuration = parseInt(trimmed.split(":")[1], 10) || 4;
     }
 
+    if (trimmed.startsWith("#EXT-X-KEY:")) {
+      currentKeyTag = trimmed;
+      inSegments = true;
+      continue;
+    }
+
     if (trimmed.startsWith("#EXTINF:")) {
       inSegments = true;
       pendingExtinf = trimmed;
@@ -299,7 +307,7 @@ export function parsePlaylist(playlistText: string): PlaylistCache {
     }
 
     if (pendingExtinf && trimmed && !trimmed.startsWith("#")) {
-      segments.push({ extinf: pendingExtinf, uri: trimmed });
+      segments.push({ extinf: pendingExtinf, uri: trimmed, keyTag: currentKeyTag || undefined });
       pendingExtinf = "";
       continue;
     }
