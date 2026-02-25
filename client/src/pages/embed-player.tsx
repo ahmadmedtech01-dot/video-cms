@@ -92,10 +92,12 @@ export default function EmbedPlayerPage() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [tickerOffset, setTickerOffset] = useState(0);
   const [playbackDenied, setPlaybackDenied] = useState(false);
+  const [denialSignal, setDenialSignal] = useState<string>("");
   const [retryKey, setRetryKey] = useState(0);
 
   const retryPlayback = () => {
     setPlaybackDenied(false);
+    setDenialSignal("");
     hlsRef.current?.destroy();
     hlsRef.current = null;
     setStatus("loading");
@@ -175,10 +177,15 @@ export default function EmbedPlayerPage() {
           hls.on(Hls.Events.ERROR, (_, d) => {
             if (d.fatal) {
               const code = (d as any).response?.code;
+              const responseText = (d as any).response?.text || "";
               if (code === 403 || code === 401) {
-                // Session revoked or expired — show PLAYBACK_DENIED overlay
                 hls.stopLoad();
                 videoRef.current?.pause();
+                // Try to extract the abuse signal from the response body
+                try {
+                  const parsed = JSON.parse(responseText);
+                  if (parsed?.signal) setDenialSignal(parsed.signal);
+                } catch {}
                 setPlaybackDenied(true);
               } else {
                 setStatus("error");
@@ -406,7 +413,15 @@ export default function EmbedPlayerPage() {
                   Video playback denied due to suspicious activity.
                 </p>
                 <p className="text-white/60 text-sm">
-                  Too many requests were detected. Please wait a moment and try again.
+                  {denialSignal === "concurrent"
+                    ? "Too many simultaneous connections were detected."
+                    : denialSignal === "playlist_abuse"
+                    ? "Excessive playlist requests were detected."
+                    : denialSignal === "key_abuse"
+                    ? "Excessive encryption key requests were detected."
+                    : denialSignal === "ip_mismatch"
+                    ? "Session used from multiple locations simultaneously."
+                    : "Too many requests were detected. Please wait a moment and try again."}
                 </p>
                 <button
                   onClick={e => { e.stopPropagation(); retryPlayback(); }}

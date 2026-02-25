@@ -13,7 +13,7 @@ import { spawn } from "child_process";
 import os from "os";
 import { vimeoFetchVideo, vimeoExtractFileLinks, vimeoDiagnoseNoFileAccess } from "./vimeo";
 import { makeB2Client, b2PresignGetObject, b2UploadFile } from "./b2";
-import { createSession, getSession, revokeSession, verifySignedPath, trackRequest, buildSignedProxyUrl, signPath } from "./video-session";
+import { createSession, getSession, revokeSession, verifySignedPath, trackRequest, trackPlaylistFetch, acquireSegment, releaseSegment, trackKeyHit, buildSignedProxyUrl, signPath } from "./video-session";
 
 function log(message: string) {
   const t = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true });
@@ -949,10 +949,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Invalid or expired token" });
     }
 
-    // Rate-limit check
-    const { abused } = trackRequest(sid);
+    // Playlist abuse + rate-limit check (includes IP binding)
+    const ip = (req.headers["x-forwarded-for"] as string || req.ip || "").split(",")[0].trim();
+    const { abused, reason } = trackPlaylistFetch(sid, ip);
     if (abused) {
-      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Video playback denied due to suspicious activity" });
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Video playback denied due to suspicious activity", signal: reason?.signal });
     }
 
     try {
@@ -1051,9 +1052,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Invalid or expired segment token" });
     }
 
-    const { abused } = trackRequest(sid);
-    if (abused) {
-      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Video playback denied due to suspicious activity" });
+    // Concurrency + rate check (includes IP binding and concurrent limit)
+    const segIp = (req.headers["x-forwarded-for"] as string || req.ip || "").split(",")[0].trim();
+    const acquire = acquireSegment(sid, segIp);
+    if (acquire.abused) {
+      return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Video playback denied due to suspicious activity", signal: acquire.reason?.signal });
     }
 
     try {
@@ -1066,31 +1069,35 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       } else {
         const client = await getS3Client();
         const s3cfg = await getS3Config();
-        if (!client || !s3cfg.bucket) return res.status(500).json({ message: "Storage not configured" });
+        if (!client || !s3cfg.bucket) { releaseSegment(sid); return res.status(500).json({ message: "Storage not configured" }); }
         const cmd = new GetObjectCommand({ Bucket: s3cfg.bucket, Key: fileKey });
         originUrl = await getSignedUrl(client, cmd, { expiresIn: 20 });
       }
 
       const fetchRes = await fetch(originUrl);
-      if (!fetchRes.ok) return res.status(404).json({ message: "Segment not found" });
+      if (!fetchRes.ok) { releaseSegment(sid); return res.status(404).json({ message: "Segment not found" }); }
 
       const contentType = segSubPath.endsWith(".m4s") ? "video/iso.segment" : "video/MP2T";
       res.setHeader("Content-Type", contentType);
       res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
       res.setHeader("X-Content-Type-Options", "nosniff");
 
-      // Stream segment bytes directly
+      // Stream segment bytes and release concurrency slot when done
       const body = fetchRes.body;
       if (body) {
         const { Readable } = await import("stream");
         const nodeStream = Readable.fromWeb(body as any);
         nodeStream.pipe(res);
-        nodeStream.on("error", () => res.end());
+        nodeStream.on("end", () => releaseSegment(sid));
+        nodeStream.on("error", () => { releaseSegment(sid); res.end(); });
+        res.on("close", () => releaseSegment(sid));
       } else {
         const buf = await fetchRes.arrayBuffer();
+        releaseSegment(sid);
         res.end(Buffer.from(buf));
       }
     } catch (e: any) {
+      releaseSegment(sid);
       log(`Segment proxy error for ${req.params.publicId}${req.path}: ${e.message}`);
       res.status(500).json({ message: "Segment error" });
     }
@@ -1107,8 +1114,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Invalid key token" });
     }
 
-    const { abused } = trackRequest(sid);
-    if (abused) return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Denied" });
+    const keyIp = (req.headers["x-forwarded-for"] as string || req.ip || "").split(",")[0].trim();
+    const { abused: keyAbused, reason: keyReason } = trackKeyHit(sid, keyIp);
+    if (keyAbused) return res.status(403).json({ code: "PLAYBACK_DENIED", message: "Denied", signal: keyReason?.signal });
 
     // When AES-128 encryption is enabled in ffmpeg, serve the key from secure store here.
     // For now, return 204 to indicate not-yet-supported without breaking clients.
