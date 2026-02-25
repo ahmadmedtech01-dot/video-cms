@@ -309,7 +309,7 @@ async function runFfmpegHls(
         `-map`, `0:v:0`, `-map`, `0:a:0`,
         `-c:v:${i}`, `libx264`, `-b:v:${i}`, cfg.b,
         `-maxrate:v:${i}`, cfg.maxrate, `-bufsize:v:${i}`, cfg.bufsize,
-        `-vf:${i}`, cfg.vf, `-c:a:${i}`, `aac`, `-b:a:${i}`, cfg.ba
+        `-filter:v:${i}`, cfg.vf, `-c:a:${i}`, `aac`, `-b:a:${i}`, cfg.ba
       );
     });
 
