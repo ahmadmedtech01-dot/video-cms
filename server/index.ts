@@ -10,12 +10,40 @@ import { adminUsers, systemSettings } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import bcrypt from "bcrypt";
 
+import fs from "fs";
+import path from "path";
+
+function crashLog(msg: string) {
+  const line = `${new Date().toISOString()} ${msg}\n`;
+  process.stdout.write(line);
+  process.stderr.write(line);
+  try { fs.appendFileSync("/tmp/vcms_crash.log", line); } catch {}
+}
+
 process.on("uncaughtException", (err) => {
-  console.error("[FATAL] Uncaught Exception:", err);
+  crashLog(`[FATAL] Uncaught Exception: ${err?.stack || err}`);
 });
 
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("[FATAL] Unhandled Rejection at:", promise, "reason:", reason);
+process.on("unhandledRejection", (reason: any) => {
+  crashLog(`[FATAL] Unhandled Rejection: ${reason?.stack || reason}`);
+});
+
+// Allow SIGTERM to exit gracefully so the process manager (pid2) can restart
+// the server cleanly rather than escalating to SIGKILL after a timeout.
+// Note: Vite's misbehaviour uses process.exit(1) programmatically — not SIGTERM —
+// so suppressing SIGTERM is unnecessary and harmful.
+process.on("SIGTERM", () => {
+  crashLog("[INFO] SIGTERM received — exiting gracefully");
+  _originalExit(0);
+});
+
+process.on("SIGINT", () => {
+  crashLog("[FATAL] SIGINT received");
+  process.exit(0);
+});
+
+process.on("exit", (code) => {
+  crashLog(`[FATAL] process 'exit' event fired with code ${code}`);
 });
 
 // Prevent Vite's customLogger from calling process.exit(1) on compilation
@@ -27,12 +55,16 @@ const _originalExit = process.exit.bind(process);
   if (c === 0) {
     _originalExit(0);
   } else {
-    console.error(`[server] process.exit(${c}) suppressed — server kept alive`);
+    crashLog(`[server] process.exit(${c}) suppressed — server kept alive`);
   }
 };
 
 const app = express();
 const httpServer = createServer(app);
+
+// Trust reverse proxies (Replit, Vercel, nginx) so req.ip and
+// HTTPS-only cookies work correctly behind load balancers.
+app.set("trust proxy", 1);
 
 declare module "http" {
   interface IncomingMessage {
@@ -69,7 +101,7 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: false,
+      secure: process.env.NODE_ENV === "production",
       maxAge: 7 * 24 * 60 * 60 * 1000,
       httpOnly: true,
     },
@@ -164,7 +196,41 @@ async function seedDefaultSettings() {
     return res.status(status).json({ message });
   });
 
-  if (process.env.NODE_ENV === "production") {
+  // Pre-warm the database connection pool so SSL handshake to Supabase
+  // completes before Vite starts compiling the frontend on first browser load.
+  if (process.env.SUPABASE_DATABASE_URL) {
+    try {
+      await pool.query("SELECT 1");
+      log("Supabase connection pre-warmed");
+    } catch (e) {
+      log(`Supabase pre-warm warning: ${e}`);
+    }
+  }
+
+  // Use pre-built frontend if available (avoids Vite JIT compilation CPU spike).
+  // import.meta.dirname is ESM-only; __dirname is CJS-only (compiled bundle).
+  // Gracefully handle both environments.
+  // Only run pre-build check in development (tsx/ESM) — in production the
+  // serveStatic() function correctly resolves paths via __dirname internally.
+  let hasBuild = false;
+  let builtFrontend = "";
+  if (process.env.NODE_ENV !== "production") {
+    try {
+      const selfDir = import.meta.dirname ?? "";
+      builtFrontend = path.resolve(selfDir, "..", "dist", "public");
+      hasBuild = selfDir !== "" && fs.existsSync(path.join(builtFrontend, "index.html"));
+    } catch {
+      hasBuild = false;
+    }
+  }
+
+  if (hasBuild) {
+    log("Serving pre-built frontend from dist/public");
+    app.use(express.static(builtFrontend));
+    app.use("/{*path}", (_req, res) => {
+      res.sendFile(path.join(builtFrontend, "index.html"));
+    });
+  } else if (process.env.NODE_ENV === "production") {
     serveStatic(app);
   } else {
     const { setupVite } = await import("./vite");
@@ -176,5 +242,6 @@ async function seedDefaultSettings() {
     log(`serving on port ${port}`);
     await seedAdmin();
     await seedDefaultSettings();
+
   });
 })();

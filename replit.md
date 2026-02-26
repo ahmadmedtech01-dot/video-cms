@@ -152,3 +152,36 @@ The system supports these video source types:
 4. Configure AWS in System Settings if using S3 uploads
 5. Upload or import videos
 6. Generate embed tokens and use the iframe/share codes on external sites
+
+## Vercel Deployment
+
+The app is Vercel-compatible via:
+- **`api/index.ts`** — Serverless Express handler (lazy-initialised, exported as default)
+- **`vercel.json`** — Build config: `npm run build`, static files from `dist/public/`, API rewrites
+
+### Vercel Setup Steps
+
+1. Push repo to GitHub
+2. Import project on [vercel.com](https://vercel.com)
+3. Vercel auto-detects `vercel.json` — no framework override needed
+4. Add these environment variables in Vercel Project Settings → Environment Variables:
+
+| Variable | Value |
+|---|---|
+| `SUPABASE_DATABASE_URL` | Supabase pooler connection string (port 6543) |
+| `SESSION_SECRET` | Strong random string |
+| `ADMIN_EMAIL` | Admin login email |
+| `ADMIN_PASSWORD` | Admin login password |
+| `SIGNING_SECRET` | JWT signing secret |
+| `B2_KEY_ID` | Backblaze B2 Key ID |
+| `B2_APPLICATION_KEY` | Backblaze B2 Application Key |
+| `B2_S3_ENDPOINT` | e.g. `https://s3.ca-east-006.backblazeb2.com` |
+| `B2_BUCKET` | B2 bucket name |
+
+5. Deploy — Vercel runs `npm run build`, serves frontend from CDN, routes `/api/*` to serverless function
+
+### Vercel Limitations
+
+- **File uploads**: Vercel limits request bodies to 4.5 MB. Large video file uploads (> 4.5 MB) must use the pre-signed direct-to-B2 upload flow already in the app.
+- **No filesystem persistence**: `/tmp` is available but ephemeral between invocations. Temporary upload files are fine; do not rely on local disk for permanent storage.
+- **Function timeout**: 30 seconds max per request. HLS segment proxying and API calls are well within this limit.
