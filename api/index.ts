@@ -6,7 +6,7 @@ import { pool, db } from "../server/db";
 import { registerRoutes } from "../server/routes";
 import { adminUsers, systemSettings } from "../shared/schema";
 import { eq } from "drizzle-orm";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 
 declare module "http" {
   interface IncomingMessage {
@@ -24,7 +24,6 @@ declare module "express-session" {
 const app = express();
 const httpServer = createServer(app);
 
-// Trust Vercel's reverse proxy so secure cookies and req.ip work correctly.
 app.set("trust proxy", 1);
 
 app.use(
@@ -68,7 +67,9 @@ async function seedAdmin() {
       const passwordHash = await bcrypt.hash(password, 12);
       await db.insert(adminUsers).values({ email, passwordHash });
     }
-  } catch {}
+  } catch (e) {
+    console.error("[api/seed] seedAdmin error:", e);
+  }
 }
 
 async function seedDefaultSettings() {
@@ -91,31 +92,59 @@ async function seedDefaultSettings() {
         await db.insert(systemSettings).values(d);
       }
     }
-  } catch {}
+  } catch (e) {
+    console.error("[api/seed] seedDefaultSettings error:", e);
+  }
 }
 
 let initPromise: Promise<void> | null = null;
 
 async function init() {
+  try {
+    await pool.query("SELECT 1");
+    console.log("[api] DB connection verified");
+  } catch (e) {
+    console.error("[api] DB connection failed:", e);
+    throw e;
+  }
+
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
+    console.error("[api] Express error:", err);
     if (res.headersSent) return next(err);
     return res.status(status).json({ message });
   });
 
   await seedAdmin();
   await seedDefaultSettings();
+  console.log("[api] Initialization complete");
 }
 
 function ensureInit() {
-  if (!initPromise) initPromise = init();
+  if (!initPromise) {
+    initPromise = init().catch((err) => {
+      initPromise = null;
+      throw err;
+    });
+  }
   return initPromise;
 }
 
 export default async function handler(req: Request, res: Response) {
-  await ensureInit();
-  return app(req, res);
+  try {
+    await ensureInit();
+  } catch (err: any) {
+    console.error("[api] Handler init failed:", err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        message: "Server initialization failed",
+        detail: String(err?.message || err),
+      });
+    }
+    return;
+  }
+  app(req, res);
 }

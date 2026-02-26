@@ -8,7 +8,7 @@ import { createServer } from "http";
 import { db } from "./db";
 import { adminUsers, systemSettings } from "@shared/schema";
 import { eq } from "drizzle-orm";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 
 import fs from "fs";
 import path from "path";
