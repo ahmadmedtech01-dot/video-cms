@@ -32,7 +32,11 @@ export default function SystemSettingsPage() {
 
   const { data: settings = [], isLoading } = useQuery<{ key: string; value: string }[]>({
     queryKey: ["/api/settings"],
-    queryFn: () => fetch("/api/settings").then(r => r.json()),
+    queryFn: async () => {
+      const response = await fetch("/api/settings");
+      const data = await response.json().catch(() => []);
+      return Array.isArray(data) ? data : [];
+    },
   });
 
   useEffect(() => {
@@ -86,7 +90,11 @@ export default function SystemSettingsPage() {
   // Storage Connections state
   const { data: storageConns = [], refetch: refetchConns } = useQuery<StorageConnection[]>({
     queryKey: ["/api/storage-connections"],
-    queryFn: () => fetch("/api/storage-connections").then(r => r.json()),
+    queryFn: async () => {
+      const response = await fetch("/api/storage-connections");
+      const data = await response.json().catch(() => []);
+      return Array.isArray(data) ? data : [];
+    },
   });
 
   const [showAddConn, setShowAddConn] = useState(false);
