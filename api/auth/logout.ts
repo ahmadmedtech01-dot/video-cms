@@ -1,5 +1,5 @@
 import { type VercelRequest, type VercelResponse } from "@vercel/node";
-import { clearSessionCookie } from "../../shared/auth";
+import { clearSessionCookie } from "../_lib/auth";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") {
