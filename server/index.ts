@@ -18,6 +18,19 @@ process.on("unhandledRejection", (reason, promise) => {
   console.error("[FATAL] Unhandled Rejection at:", promise, "reason:", reason);
 });
 
+// Prevent Vite's customLogger from calling process.exit(1) on compilation
+// errors (e.g. PostCSS warnings escalated to errors). Only allow clean
+// exits (code 0) to propagate; all error exits are logged and suppressed.
+const _originalExit = process.exit.bind(process);
+(process as any).exit = (code?: number | string) => {
+  const c = code === undefined ? 0 : Number(code);
+  if (c === 0) {
+    _originalExit(0);
+  } else {
+    console.error(`[server] process.exit(${c}) suppressed — server kept alive`);
+  }
+};
+
 const app = express();
 const httpServer = createServer(app);
 
