@@ -1,9 +1,9 @@
 import { type VercelRequest, type VercelResponse } from "@vercel/node";
 import bcrypt from "bcryptjs";
-import { db } from "../../server/lib/db";
+import { db } from "../../shared/db";
 import { adminUsers } from "../../shared/schema";
 import { eq } from "drizzle-orm";
-import { signSession, setSessionCookie } from "../../server/lib/auth";
+import { signSession, setSessionCookie } from "../../shared/auth";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") {
