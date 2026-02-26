@@ -69992,4 +69992,4 @@ object-assign/index.js:
   @license MIT
   *)
 */
-if (typeof module !== 'undefined' && module.exports && module.exports.default) { module.exports = module.exports.default; }
+if (typeof handler !== 'undefined') module.exports = handler;
