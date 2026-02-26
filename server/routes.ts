@@ -22,6 +22,15 @@ function log(message: string) {
   console.log(`${t} [routes] ${message}`);
 }
 
+function asyncHandler(fn: (req: any, res: any, next: any) => Promise<any>) {
+  return (req: any, res: any, next: any) => {
+    Promise.resolve(fn(req, res, next)).catch((err) => {
+      console.error("[routes] Unhandled async error:", err);
+      next(err);
+    });
+  };
+}
+
 // Middleware
 function requireAuth(req: any, res: any, next: any) {
   if (!req.session?.adminId) {
@@ -496,6 +505,20 @@ async function rewritePlaylistWithSignedUrls(
 
 // Routes
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+
+  // Auto-wrap all async route handlers so any unhandled rejection
+  // is forwarded to Express error middleware instead of crashing the process.
+  for (const method of ["get", "post", "put", "patch", "delete"] as const) {
+    const original = (app as any)[method].bind(app);
+    (app as any)[method] = (routePath: any, ...handlers: any[]) => {
+      const wrapped = handlers.map((h: any) =>
+        typeof h === "function" && h.constructor?.name === "AsyncFunction"
+          ? asyncHandler(h)
+          : h
+      );
+      return original(routePath, ...wrapped);
+    };
+  }
 
   // ── Auth ──────────────────────────────────────────────────
   app.post("/api/auth/login", async (req, res) => {
