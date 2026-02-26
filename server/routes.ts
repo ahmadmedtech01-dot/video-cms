@@ -503,6 +503,81 @@ async function rewritePlaylistWithSignedUrls(
   return rewritten.join("\n");
 }
 
+// Startup recovery: resume any videos stuck in "processing" when the server restarted
+export async function recoverProcessingVideos(): Promise<void> {
+  try {
+    const allVideos = await storage.getVideos();
+    const stuck = allVideos.filter(v => v.status === "processing");
+    if (stuck.length === 0) return;
+    log(`[recovery] Found ${stuck.length} video(s) stuck in processing — resuming...`);
+
+    for (const video of stuck) {
+      if (transcodeProgress.has(video.id)) continue;
+
+      const rawKey = (video as any).rawS3Key as string | null;
+      const connId = (video as any).storageConnectionId as string | null;
+      const sourceType = video.sourceType;
+      const sourceUrl = video.sourceUrl;
+
+      if (rawKey && connId) {
+        log(`[recovery] Re-transcoding video ${video.id} from B2 (${rawKey})`);
+        // Mark immediately so concurrent retranscode requests see it as active
+        transcodeProgress.set(video.id, { time: "", speed: "", stage: "recovering" });
+        (async () => {
+          try {
+            const conn = await storage.getStorageConnectionById(connId);
+            if (!conn) throw new Error("Storage connection not found");
+            const cfg = conn.config as any;
+            const b2 = makeB2Client({ endpoint: cfg.endpoint });
+            const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+            const resp = await b2.send(new GetObjectCommand({ Bucket: cfg.bucket, Key: rawKey }));
+            const tmpPath = path.join(os.tmpdir(), `recover-${video.id}.mp4`);
+            const bodyStream = resp.Body as any;
+            const ws = fs.createWriteStream(tmpPath);
+            await new Promise<void>((resolve, reject) => {
+              bodyStream.pipe(ws);
+              ws.on("finish", resolve);
+              ws.on("error", reject);
+            });
+            const quals = (video as any).qualities?.length ? (video as any).qualities : [720, 480, 360];
+            await transcodeAndStoreHls(video.id, tmpPath, quals);
+            try { fs.unlinkSync(tmpPath); } catch {}
+            log(`[recovery] Video ${video.id} recovered successfully`);
+          } catch (e: any) {
+            log(`[recovery] Failed to recover video ${video.id}: ${e.message}`);
+            await storage.updateVideo(video.id, { status: "error", lastError: `Recovery failed: ${e.message}` } as any);
+          }
+        })();
+        continue;
+      }
+
+      if ((sourceType === "vimeo" || sourceType === "vimeo_ingest") && sourceUrl) {
+        log(`[recovery] Re-ingesting Vimeo video ${video.id}`);
+        ingestVimeoVideo(video.id, sourceUrl).catch(async (e: Error) => {
+          await storage.updateVideo(video.id, { status: "error", lastError: e.message } as any);
+        });
+        continue;
+      }
+
+      if (sourceType === "direct_url" && sourceUrl && !/\.m3u8/i.test(sourceUrl)) {
+        log(`[recovery] Re-ingesting direct URL video ${video.id}`);
+        ingestDirectMp4(video.id, sourceUrl).catch(async (e: Error) => {
+          await storage.updateVideo(video.id, { status: "error", lastError: e.message } as any);
+        });
+        continue;
+      }
+
+      log(`[recovery] Video ${video.id} has no recoverable source — marking as error`);
+      await storage.updateVideo(video.id, {
+        status: "error",
+        lastError: "Processing was interrupted and cannot be automatically recovered. Please re-upload the video.",
+      } as any);
+    }
+  } catch (e: any) {
+    log(`[recovery] Startup recovery error: ${e.message}`);
+  }
+}
+
 // Routes
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
 

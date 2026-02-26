@@ -2,7 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
-import { registerRoutes } from "./routes";
+import { registerRoutes, recoverProcessingVideos } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { db } from "./db";
@@ -242,6 +242,6 @@ async function seedDefaultSettings() {
     log(`serving on port ${port}`);
     await seedAdmin();
     await seedDefaultSettings();
-
+    recoverProcessingVideos();
   });
 })();
