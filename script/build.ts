@@ -7,6 +7,7 @@ import { rm, readFile } from "fs/promises";
 const allowlist = [
   "@google/generative-ai",
   "axios",
+  "bcryptjs",
   "connect-pg-simple",
   "cors",
   "date-fns",
@@ -58,6 +59,25 @@ async function buildAll() {
     minify: true,
     external: externals,
     logLevel: "info",
+  });
+
+  console.log("building vercel api function...");
+  await esbuild({
+    entryPoints: ["api/index.ts"],
+    platform: "node",
+    bundle: true,
+    format: "cjs",
+    outfile: "api/index.js",
+    define: {
+      "process.env.NODE_ENV": '"production"',
+    },
+    minify: false,
+    external: externals,
+    logLevel: "info",
+    // Ensure the default export is directly callable by Vercel's runtime.
+    footer: {
+      js: "if (typeof module !== 'undefined' && module.exports && module.exports.default) { module.exports = module.exports.default; }",
+    },
   });
 }
 
