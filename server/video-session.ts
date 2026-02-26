@@ -49,6 +49,8 @@ export interface VideoSession {
   revoked: boolean;
   revokeReason: AbuseReason | null;
   abuseScore: number;
+  breachEvents: number;
+  blockedUntil: number | null;
   requestLog: number[];
   concurrentSegments: number;
   playlistFetchLog: number[];
@@ -97,6 +99,8 @@ export function createSession(
     revoked: false,
     revokeReason: null,
     abuseScore: 0,
+    breachEvents: 0,
+    blockedUntil: null,
     requestLog: [],
     concurrentSegments: 0,
     playlistFetchLog: [],
@@ -145,10 +149,16 @@ export function verifySignedPath(sid: string, resourcePath: string, exp: number,
   }
 }
 
+const VIOLATION_LIMIT = 6;
+const BLOCK_DURATION_MS = 10 * 60 * 1000;
+
 function addAbuse(s: VideoSession, delta: number, reason: AbuseReason): { abused: boolean } {
   s.abuseScore += delta;
-  if (s.abuseScore >= ABUSE_THRESHOLDS.scoreToRevoke) {
+  s.breachEvents += 1;
+
+  if (s.breachEvents >= VIOLATION_LIMIT || s.abuseScore >= ABUSE_THRESHOLDS.scoreToRevoke) {
     s.revoked = true;
+    s.blockedUntil = Date.now() + BLOCK_DURATION_MS;
     if (!s.revokeReason) s.revokeReason = reason;
     return { abused: true };
   }
@@ -286,7 +296,7 @@ export function parsePlaylist(playlistText: string): PlaylistCache {
   const lines = playlistText.split("\n");
   const headerLines: string[] = [];
   const segments: ParsedSegment[] = [];
-  let targetDuration = 4;
+  let targetDuration = 2;
   let inSegments = false;
   let pendingExtinf = "";
   let currentKeyTag = "";
@@ -296,7 +306,7 @@ export function parsePlaylist(playlistText: string): PlaylistCache {
     if (trimmed === "#EXT-X-ENDLIST") continue;
 
     if (trimmed.startsWith("#EXT-X-TARGETDURATION:")) {
-      targetDuration = parseInt(trimmed.split(":")[1], 10) || 4;
+      targetDuration = parseInt(trimmed.split(":")[1], 10) || 2;
     }
 
     if (trimmed.startsWith("#EXT-X-KEY:")) {
@@ -338,6 +348,9 @@ export function getSessionAbuseSummary(sid: string) {
     revoked: s.revoked,
     revokeReason: s.revokeReason,
     abuseScore: s.abuseScore,
+    breachCount: s.breachEvents,
+    violationLimit: VIOLATION_LIMIT,
+    blockedUntil: s.blockedUntil,
     concurrentSegments: s.concurrentSegments,
     recentRequests: s.requestLog.length,
     playlistFetches: s.playlistFetchLog.length,
@@ -346,4 +359,19 @@ export function getSessionAbuseSummary(sid: string) {
     currentSegmentIndex: s.currentSegmentIndex,
     outOfWindowCount: s.outOfWindowCount,
   };
+}
+
+export function getBreachInfo(sid: string): { breachCount: number; violationLimit: number; blocked: boolean; blockSecondsRemaining: number } {
+  const s = sessions.get(sid);
+  if (!s) return { breachCount: 0, violationLimit: VIOLATION_LIMIT, blocked: true, blockSecondsRemaining: 0 };
+  const remaining = s.blockedUntil ? Math.max(0, Math.ceil((s.blockedUntil - Date.now()) / 1000)) : 0;
+  return { breachCount: s.breachEvents, violationLimit: VIOLATION_LIMIT, blocked: s.revoked, blockSecondsRemaining: remaining };
+}
+
+export function getAbuseThresholds() {
+  return { ...ABUSE_THRESHOLDS };
+}
+
+export function getAllSessions() {
+  return sessions;
 }

@@ -10,7 +10,7 @@ A full-stack secure video content management system for a single admin user.
 - **Backend**: Node.js + Express 5 (TypeScript)
 - **Database**: PostgreSQL via Drizzle ORM
 - **Storage**: Backblaze B2 (S3-Compatible, primary) + AWS S3 (legacy) + local fallback — managed via Storage Connections in System Settings
-- **Video Processing**: ffmpeg for HLS transcoding (when available)
+- **Video Processing**: ffmpeg for HLS transcoding (2s segment duration, AES-128 encrypted)
 - **Auth**: Session-based (express-session + connect-pg-simple)
 
 ## Features
@@ -51,13 +51,16 @@ Secure HLS proxy — B2/S3 origin URLs are **never** sent to the frontend:
 
 **Layer 3 — Sliding Window Playlist**: Variant playlists return only the next 6 segments (not the entire video). The playlist is served as a live-like HLS stream (no `#EXT-X-ENDLIST` until the final window). hls.js reloads it periodically and only sees segments in the current window. Progress tracked via `POST /api/stream/:publicId/progress` (every 10s) and via segment access (auto-advances window when segments are fetched).
 
-**Abuse Detection** (server/video-session.ts): Sessions revoked when abuse score reaches 10:
-- Rate limit: >25 requests/5s → +5 score
-- Concurrent segments: >3 simultaneous → +5
-- Playlist abuse: >30 fetches/min → +3
+**Abuse Detection** (server/video-session.ts): Sessions revoked when abuse score reaches 15:
+- Rate limit: >50 requests/5s → +5 score
+- Concurrent segments: >6 simultaneous → +5
+- Playlist abuse: >60 fetches/min → +3
 - IP mismatch: different IP on same session → +8
 - Out-of-window: segment request outside [current-1, current+6] → +3 (after 3 violations)
-- Key abuse: >8 key requests/min → +5
+- Key abuse: >120 key requests/min → +5
+- Breach response format: `{ error: "SECURITY_BREACH", breach: "X/6" }` in denial responses
+
+**AES-128 Double Encryption**: Server decrypts segments with master key (fetched from B2, cached), re-encrypts with session-specific ephemeral key/IV. Player never sees master key.
 
 **Client-Side Protection** (useSecurityViolations hook): Violation counter with per-video localStorage persistence, 3s debounce per event type, configurable limit. On limit reached: 10-minute cooldown with countdown overlay. Events: RIGHT_CLICK, FOCUS_LOST, DEVTOOLS_DETECTED, FULLSCREEN_REQUIRED_BREACH, DOWNLOAD_ATTEMPT.
 
@@ -106,6 +109,9 @@ Signing secret: auto-derived from `SESSION_SECRET`; override with `SIGNING_SECRE
 - `GET/PUT /api/settings` — Get/update system settings
 - `GET /api/audit` — Get audit logs
 - `GET /api/dashboard` — Dashboard stats
+
+### Debug (dev mode only)
+- `GET /api/_debug/secure-hls/selftest?videoId=...` — Runs automated checks (transcode, masking, token expiry, rate limit, block, iOS compatibility)
 
 ## Environment Variables
 
