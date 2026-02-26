@@ -1,6 +1,6 @@
 import { type VercelRequest, type VercelResponse } from "@vercel/node";
 import bcrypt from "bcryptjs";
-import { signSession, setSessionCookie } from "../_lib/auth";
+import { signSession, setSessionCookie } from "../_lib/auth.js";
 
 function parseCredentials(body: unknown): { email: string; password: string } {
   if (!body || typeof body !== "object") {
@@ -40,8 +40,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const hasDbUrl = Boolean(process.env.SUPABASE_DATABASE_URL || process.env.DATABASE_URL);
     if (hasDbUrl) {
       const [{ db }, { adminUsers }, { eq }] = await Promise.all([
-        import("../_lib/db"),
-        import("../_lib/schema"),
+        import("../_lib/db.js"),
+        import("../_lib/schema.js"),
         import("drizzle-orm"),
       ]);
 
