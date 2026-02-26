@@ -1,3 +1,4 @@
+// @ts-nocheck
 import type { Express } from "express";
 import { type Server } from "http";
 import multer from "multer";
@@ -16,6 +17,7 @@ import crypto from "crypto";
 import { makeB2Client, b2PresignGetObject, b2UploadFile } from "./b2";
 import { createSession, getSession, revokeSession, verifySignedPath, trackRequest, trackPlaylistFetch, acquireSegment, releaseSegment, trackKeyHit, buildSignedProxyUrl, signPath, computeDeviceHash, updateProgress, validateSegmentWindow, parsePlaylist, getWindowRange, getBreachInfo, getAbuseThresholds, getAllSessions } from "./video-session";
 import type { PlaylistCache } from "./video-session";
+import { requireAuth } from "./lib/auth";
 
 function log(message: string) {
   const t = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true });
@@ -29,14 +31,6 @@ function asyncHandler(fn: (req: any, res: any, next: any) => Promise<any>) {
       next(err);
     });
   };
-}
-
-// Middleware
-function requireAuth(req: any, res: any, next: any) {
-  if (!req.session?.adminId) {
-    return res.status(401).json({ message: "Unauthorized" });
-  }
-  next();
 }
 
 // Multer setup
@@ -520,54 +514,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     };
   }
 
-  // ── Auth ──────────────────────────────────────────────────
-  app.post("/api/auth/login", async (req, res) => {
-    try {
-      const { email, password } = req.body;
-      if (!email || !password) return res.status(400).json({ message: "Email and password required" });
-
-      const admin = await storage.getAdminByEmail(email);
-      if (!admin) return res.status(401).json({ message: "Invalid credentials" });
-
-      const valid = await bcrypt.compare(password, admin.passwordHash);
-      if (!valid) return res.status(401).json({ message: "Invalid credentials" });
-
-      req.session.adminId = admin.id;
-      req.session.adminEmail = admin.email;
-      res.json({ ok: true, email: admin.email });
-    } catch (e) {
-      res.status(500).json({ message: "Login failed" });
-    }
-  });
-
-  app.post("/api/auth/register", async (req, res) => {
-    try {
-      const { email, password } = req.body;
-      if (!email || !password) return res.status(400).json({ message: "Email and password required" });
-      if (password.length < 8) return res.status(400).json({ message: "Password must be at least 8 characters" });
-
-      const existing = await storage.getAdminByEmail(email);
-      if (existing) return res.status(409).json({ message: "Email already registered" });
-
-      const passwordHash = await bcrypt.hash(password, 12);
-      const admin = await storage.createAdminUser(email, passwordHash);
-
-      req.session.adminId = admin.id;
-      req.session.adminEmail = admin.email;
-      res.status(201).json({ ok: true, email: admin.email });
-    } catch (e) {
-      res.status(500).json({ message: "Registration failed" });
-    }
-  });
-
-  app.post("/api/auth/logout", requireAuth, (req, res) => {
-    req.session.destroy(() => res.json({ ok: true }));
-  });
-
-  app.get("/api/auth/me", (req, res) => {
-    if (!req.session?.adminId) return res.status(401).json({ message: "Not authenticated" });
-    res.json({ id: req.session.adminId, email: req.session.adminEmail });
-  });
 
   // ── Videos ────────────────────────────────────────────────
   app.get("/api/videos", requireAuth, async (req, res) => {

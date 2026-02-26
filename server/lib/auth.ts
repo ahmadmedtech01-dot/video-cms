@@ -30,7 +30,7 @@ export function verifySession(token: string): AuthSession | null {
 }
 
 export function getSessionFromRequest(req: Request): AuthSession | null {
-  const cookies = req.headers.cookie;
+  const cookies = (req.headers.cookie as string) || "";
   if (!cookies) return null;
 
   const match = cookies.match(new RegExp(`(^|;)\\s*${COOKIE_NAME}=([^;]+)`));
@@ -70,6 +70,15 @@ export function requireAuth(req: Request, res: Response, next: () => void) {
   if (!session) {
     return res.status(401).json({ ok: false, error: "Unauthorized" });
   }
+  // Provide compatibility for code expecting req.session.adminId
   (req as any).authSession = session;
+  (req as any).session = {
+    adminId: session.adminId,
+    adminEmail: session.adminEmail,
+    destroy: (cb: any) => {
+      clearSessionCookie(res);
+      if (cb) cb();
+    }
+  };
   next();
 }
