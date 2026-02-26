@@ -15,6 +15,11 @@ export const storage = {
     return admin;
   },
 
+  async createAdminUser(email: string, passwordHash: string): Promise<AdminUser> {
+    const [admin] = await db.insert(adminUsers).values({ email, passwordHash }).returning();
+    return admin;
+  },
+
   // Videos
   async getVideos(): Promise<Video[]> {
     return db.select().from(videos).orderBy(desc(videos.createdAt));

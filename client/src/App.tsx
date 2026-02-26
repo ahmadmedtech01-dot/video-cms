@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Moon, Sun } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import LoginPage from "@/pages/login";
+import RegisterPage from "@/pages/register";
 import DashboardPage from "@/pages/dashboard";
 import LibraryPage from "@/pages/library";
 import UploadPage from "@/pages/upload";
@@ -84,6 +85,7 @@ function Router() {
   return (
     <Switch>
       <Route path="/login" component={LoginPage} />
+      <Route path="/register" component={RegisterPage} />
       <Route path="/embed/:publicId" component={EmbedPlayerPage} />
       <Route path="/v/:publicId" component={SharePlayerPage} />
       <Route path="/" component={() => <ProtectedRoute component={DashboardPage} />} />

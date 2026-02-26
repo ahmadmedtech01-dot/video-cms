@@ -62,13 +62,13 @@ async function buildAll() {
   });
 
   console.log("building vercel api function...");
-  await rm("api/index.js", { force: true });
+  await rm("api/[...path].js", { force: true });
   await esbuild({
     entryPoints: ["server/vercel-handler.ts"],
     platform: "node",
     bundle: true,
     format: "cjs",
-    outfile: "api/[...path].js",
+    outfile: "api/index.js",
     define: {
       "process.env.NODE_ENV": '"production"',
     },

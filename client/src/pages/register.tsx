@@ -9,29 +9,38 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useToast } from "@/hooks/use-toast";
 import { Zap, Lock, Mail, Eye, EyeOff } from "lucide-react";
 
-export default function LoginPage() {
+export default function RegisterPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
   const [showPass, setShowPass] = useState(false);
   const [, setLocation] = useLocation();
   const qc = useQueryClient();
   const { toast } = useToast();
 
-  const login = useMutation({
-    mutationFn: () => apiRequest("POST", "/api/auth/login", { email, password }),
+  const register = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/auth/register", { email, password }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/auth/me"] });
       setLocation("/");
     },
     onError: (e: any) => {
-      toast({ title: "Login failed", description: e.message || "Invalid credentials", variant: "destructive" });
+      toast({ title: "Registration failed", description: e.message || "Could not create account", variant: "destructive" });
     },
   });
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (password !== confirm) {
+      toast({ title: "Passwords do not match", variant: "destructive" });
+      return;
+    }
+    register.mutate();
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
       <div className="w-full max-w-md space-y-6">
-        {/* Logo */}
         <div className="flex flex-col items-center gap-3 text-center">
           <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-primary shadow-lg">
             <Zap className="h-7 w-7 text-primary-foreground" />
@@ -44,14 +53,11 @@ export default function LoginPage() {
 
         <Card className="border border-card-border shadow-md">
           <CardHeader className="pb-4">
-            <CardTitle className="text-lg">Sign in</CardTitle>
-            <CardDescription>Enter your admin credentials to continue</CardDescription>
+            <CardTitle className="text-lg">Create account</CardTitle>
+            <CardDescription>Register a new admin account</CardDescription>
           </CardHeader>
           <CardContent>
-            <form
-              onSubmit={(e) => { e.preventDefault(); login.mutate(); }}
-              className="space-y-4"
-            >
+            <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-1.5">
                 <Label htmlFor="email">Email</Label>
                 <div className="relative">
@@ -63,7 +69,7 @@ export default function LoginPage() {
                     onChange={e => setEmail(e.target.value)}
                     placeholder="admin@example.com"
                     className="pl-9"
-                    data-testid="input-email"
+                    data-testid="input-register-email"
                     required
                   />
                 </div>
@@ -78,10 +84,11 @@ export default function LoginPage() {
                     type={showPass ? "text" : "password"}
                     value={password}
                     onChange={e => setPassword(e.target.value)}
-                    placeholder="••••••••"
+                    placeholder="Min. 8 characters"
                     className="pl-9 pr-9"
-                    data-testid="input-password"
+                    data-testid="input-register-password"
                     required
+                    minLength={8}
                   />
                   <button
                     type="button"
@@ -94,22 +101,39 @@ export default function LoginPage() {
                 </div>
               </div>
 
+              <div className="space-y-1.5">
+                <Label htmlFor="confirm">Confirm password</Label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    id="confirm"
+                    type={showPass ? "text" : "password"}
+                    value={confirm}
+                    onChange={e => setConfirm(e.target.value)}
+                    placeholder="Re-enter password"
+                    className="pl-9"
+                    data-testid="input-register-confirm"
+                    required
+                  />
+                </div>
+              </div>
+
               <Button
                 type="submit"
                 className="w-full"
-                disabled={login.isPending}
-                data-testid="button-login"
+                disabled={register.isPending}
+                data-testid="button-register"
               >
-                {login.isPending ? "Signing in..." : "Sign in"}
+                {register.isPending ? "Creating account..." : "Create account"}
               </Button>
             </form>
           </CardContent>
         </Card>
 
         <p className="text-center text-sm text-muted-foreground">
-          Don't have an account?{" "}
-          <Link href="/register" className="text-primary hover:underline font-medium" data-testid="link-register">
-            Create account
+          Already have an account?{" "}
+          <Link href="/login" className="text-primary hover:underline font-medium" data-testid="link-signin">
+            Sign in
           </Link>
         </p>
       </div>

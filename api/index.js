@@ -67283,6 +67283,10 @@ var storage = {
     const [admin] = await db.select().from(adminUsers).where(eq(adminUsers.email, email));
     return admin;
   },
+  async createAdminUser(email, passwordHash) {
+    const [admin] = await db.insert(adminUsers).values({ email, passwordHash }).returning();
+    return admin;
+  },
   // Videos
   async getVideos() {
     return db.select().from(videos).orderBy(desc(videos.createdAt));
@@ -68263,6 +68267,22 @@ async function registerRoutes(httpServer2, app2) {
       res.json({ ok: true, email: admin.email });
     } catch (e) {
       res.status(500).json({ message: "Login failed" });
+    }
+  });
+  app2.post("/api/auth/register", async (req, res) => {
+    try {
+      const { email, password } = req.body;
+      if (!email || !password) return res.status(400).json({ message: "Email and password required" });
+      if (password.length < 8) return res.status(400).json({ message: "Password must be at least 8 characters" });
+      const existing = await storage.getAdminByEmail(email);
+      if (existing) return res.status(409).json({ message: "Email already registered" });
+      const passwordHash = await bcryptjs_default.hash(password, 12);
+      const admin = await storage.createAdminUser(email, passwordHash);
+      req.session.adminId = admin.id;
+      req.session.adminEmail = admin.email;
+      res.status(201).json({ ok: true, email: admin.email });
+    } catch (e) {
+      res.status(500).json({ message: "Registration failed" });
     }
   });
   app2.post("/api/auth/logout", requireAuth, (req, res) => {
